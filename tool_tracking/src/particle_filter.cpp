@@ -40,11 +40,12 @@
 using namespace std;
 
 ParticleFilter::ParticleFilter(ros::NodeHandle *nodehandle):
-        node_handle(*nodehandle), numParticles(100){
+        node_handle(*nodehandle), numParticles(100), down_sample_rate(0.004), error_pos(1), error_ori(1){
 
 	initializeParticles();
 
-	/**** need to subscribe this for simulation ***/
+	//Intermediary variable representing Gcb
+	//Will be converted to Affind3d arm_x_cam_y and then into cv::mat Cam_x_arm_y
     tf::StampedTransform arm_1__cam_l_st;
     tf::StampedTransform arm_2__cam_l_st;
     tf::StampedTransform arm_1__cam_r_st;
@@ -66,32 +67,19 @@ ParticleFilter::ParticleFilter(ros::NodeHandle *nodehandle):
         exit(1);
     }
 
-    //Convert to Affine3ds for storage, which is the format they will be used in for rendering.
-    XformUtils xfu;
+	//Intermediary variables representing Gcb
+	//Will be converted to cv::mat Cam_x_arm_y
+	XformUtils xfu;
     arm_1__cam_l = xfu.transformTFToAffine3d(arm_1__cam_l_st);//.inverse();
     arm_1__cam_r = xfu.transformTFToAffine3d(arm_1__cam_r_st);//.inverse();
     arm_2__cam_l = xfu.transformTFToAffine3d(arm_2__cam_l_st);//.inverse();
     arm_2__cam_r = xfu.transformTFToAffine3d(arm_2__cam_r_st);//.inverse();
 
-    convertEigenToMat(arm_1__cam_l, Cam_left_arm_1);
+	//cv::mat representation of Gcb
+	convertEigenToMat(arm_1__cam_l, Cam_left_arm_1);
     convertEigenToMat(arm_1__cam_r, Cam_right_arm_1);
     convertEigenToMat(arm_2__cam_l, Cam_left_arm_2);
     convertEigenToMat(arm_2__cam_r, Cam_right_arm_2);
-
-//    ROS_INFO_STREAM("Cam_left_arm_1: " << Cam_left_arm_1);
-//    ROS_INFO_STREAM("Cam_right_arm_1: " << Cam_right_arm_1);
-//    ROS_INFO_STREAM("Cam_left_arm_2: " << Cam_left_arm_2);
-//    ROS_INFO_STREAM("Cam_right_arm_2: " << Cam_right_arm_2);
-//
-//	Cam_left_arm_1 = (cv::Mat_<double>(4,4) << -0.8361,0.5340, 0.1264, -0.1142,
-//	0.5132, 0.8424, -0.1641, -0.0262,
-//	-0.1942, -0.0723, -0.9783, 0.1273,
-//	0,0, 0,1.0000);
-//
-//	Cam_right_arm_1 = (cv::Mat_<double>(4,4) << -0.8361,0.5340, 0.1264, -0.1192,
-//			0.5132, 0.8424, -0.1641, -0.0262,
-//			-0.1942, -0.0723, -0.9783, 0.1273,
-//			0,0, 0,1.0000);
 
 	ROS_INFO_STREAM("Cam_left_arm_1: " << Cam_left_arm_1);
 	ROS_INFO_STREAM("Cam_right_arm_1: " << Cam_right_arm_1);
@@ -99,15 +87,14 @@ ParticleFilter::ParticleFilter(ros::NodeHandle *nodehandle):
 	projectionMat_subscriber_r = node_handle.subscribe("/davinci_endo/right/camera_info", 1, &ParticleFilter::projectionRightCB, this);
 	projectionMat_subscriber_l = node_handle.subscribe("/davinci_endo/left/camera_info", 1, &ParticleFilter::projectionLeftCB, this);
 
-	// initialization, just basic black image ??? how to get the size of the image
-	toolImage_left_arm_1 = cv::Mat::zeros(480, 640, CV_8UC3);
-	toolImage_right_arm_1 = cv::Mat::zeros(480, 640, CV_8UC3);
+	toolImage_left_arm_1 = cv::Mat::zeros(480, 640, CV_8UC3);  //left rendered Image for ARM 1
+	toolImage_right_arm_1 = cv::Mat::zeros(480, 640, CV_8UC3); //right rendered Image for ARM 1
 
-	toolImage_left_arm_2 = cv::Mat::zeros(480, 640, CV_8UC3);
-	toolImage_right_arm_2 = cv::Mat::zeros(480, 640, CV_8UC3);
+	toolImage_left_arm_2 = cv::Mat::zeros(480, 640, CV_8UC3); //left rendered Image for ARM 2
+	toolImage_right_arm_2 = cv::Mat::zeros(480, 640, CV_8UC3); //right rendered Image for ARM 2
 
-	toolImage_left_temp = cv::Mat::zeros(480, 640, CV_8UC3);
-	toolImage_right_temp = cv::Mat::zeros(480, 640, CV_8UC3);
+	toolImage_left_temp = cv::Mat::zeros(480, 640, CV_8UC3); //left rendered Image
+	toolImage_right_temp = cv::Mat::zeros(480, 640, CV_8UC3); //right rendered Image
 
 	raw_image_left = cv::Mat::zeros(480, 640, CV_8UC3);
 	raw_image_right = cv::Mat::zeros(480, 640, CV_8UC3);
@@ -119,7 +106,6 @@ ParticleFilter::ParticleFilter(ros::NodeHandle *nodehandle):
 };
 
 ParticleFilter::~ParticleFilter() {
-
 };
 
 void ParticleFilter::initializeParticles() {
@@ -129,20 +115,18 @@ void ParticleFilter::initializeParticles() {
 
 	particles_arm_1.resize(numParticles); //initialize particle array
 	particleWeights_arm_1.resize(numParticles); //initialize particle weight array
-
 	particles_arm_2.resize(numParticles); //initialize particle array
 	particleWeights_arm_2.resize(numParticles); //initialize particle weight array
 
-    /******Find and convert our various params and inputs******/
-    //Get sensor update.
+	//Compute initial guess from FK and generate particles around initial guess
     kinematics = Davinci_fwd_solver();
     getCoarseGuess();
 };
 
 void ParticleFilter::getCoarseGuess(){
-    //Pull in our first round of sensor data.
+	//Initialize joint feedback data
     davinci_interface::init_joint_feedback(node_handle);
-
+	//store robot joint angles
     std::vector<std::vector<double> > tmp;
     tmp.resize(2);
     if(davinci_interface::get_fresh_robot_pos(tmp)){
@@ -150,40 +134,39 @@ void ParticleFilter::getCoarseGuess(){
         sensor_2 = tmp[1];
     }
 
-//    Eigen::Affine3d a1_pos = kinematics.fwd_kin_solve(Vectorq7x1(sensor_1.data()));
-//
-//    Eigen::Vector3d a1_trans = a1_pos.translation();
-//    cv::Mat a1_rvec = cv::Mat::zeros(3,1,CV_64FC1);
-//    computeRodriguesVec(a1_pos, a1_rvec);
-
-    Eigen::Affine3d a1_pos_1 = kinematics.computeAffineOfDH(DH_a_params[0], DH_d1, DH_alpha_params[0], sensor_1[0] + DH_q_offset0 );
+	//Compute position variable a1_rvec representing joints 1-4 (3x1 cv::mat) using FK and DH parameters
+	Eigen::Affine3d a1_pos_1 = kinematics.computeAffineOfDH(DH_a_params[0], DH_d1, DH_alpha_params[0], sensor_1[0] + DH_q_offset0 );
     Eigen::Affine3d a1_pos_2 = kinematics.computeAffineOfDH(DH_a_params[1], DH_d2, DH_alpha_params[1], sensor_1[1] + DH_q_offset1 );
     Eigen::Affine3d a1_pos_3 = kinematics.computeAffineOfDH(DH_a_params[2], sensor_1[2] + DH_q_offset2, DH_alpha_params[2], 0.0 );
     Eigen::Affine3d a1_pos_4 = kinematics.computeAffineOfDH(DH_a_params[3],  DH_d4, DH_alpha_params[3], sensor_1[3] + DH_q_offset3 );
-
     Eigen::Affine3d a1_pos = kinematics.affine_frame0_wrt_base_ * a1_pos_1 * a1_pos_2 * a1_pos_3* a1_pos_4;// *a1_5 * a1_6 * a1_7 * kinematics.affine_gripper_wrt_frame6_ ;
     Eigen::Vector3d a1_trans = a1_pos.translation();
-
     cv::Mat a1_rvec = cv::Mat::zeros(3,1,CV_64FC1);
     computeRodriguesVec(a1_pos, a1_rvec);
 
-    /*** first arm particles initialization ***/
-    initial.tvec_cyl(0) = a1_trans[0];  //left and right (image frame)
-    initial.tvec_cyl(1) = a1_trans[1];  //up and down
-    initial.tvec_cyl(2) = a1_trans[2];
-    initial.rvec_cyl(0) = a1_rvec.at<double>(0,0);
+	//toolModel representation of initial guess of configuration of joints 1-4 computed above
+    initial.tvec_cyl(0) = a1_trans[0];// + 0.01;  //left and right (image frame)
+    initial.tvec_cyl(1) = a1_trans[1] + 0.001;  //up and down
+    initial.tvec_cyl(2) = a1_trans[2];// + 0.004;
+    initial.rvec_cyl(0) = a1_rvec.at<double>(0,0) + 0.005;
     initial.rvec_cyl(1) = a1_rvec.at<double>(1,0);
     initial.rvec_cyl(2) = a1_rvec.at<double>(2,0);
 
-    double theta_cylinder = tmp[0][4]; //initial guess
-    double theta_oval = tmp[0][5]; //initial guess
-    double theta_open = tmp[0][6]; //initial guess
+    double theta_cylinder = sensor_1[4]; //guess from sensor
+    double theta_oval = sensor_1[5]; //guess from sensor
+    double theta_open = sensor_1[6]; //guess from sensor
 
+	//Randomly generate particles around initial guess
+	//Particles stored as a vector of toolModels
     for (int i = 0; i < numParticles; i++) {
-        particles_arm_1[i] = newToolModel.setRandomConfig(initial, theta_cylinder, theta_oval, theta_open );
+        particles_arm_1[i] = newToolModel.setRandomConfig(initial, theta_cylinder, theta_oval, theta_open, down_sample_rate);
     }
 
+	//Update initial to the pose from FK from above
+	newToolModel.computeEllipsePose(initial, theta_cylinder, theta_oval, theta_open);
+
 };
+
 void ParticleFilter::projectionRightCB(const sensor_msgs::CameraInfo::ConstPtr &projectionRight){
 
 	P_right.at<double>(0,0) = projectionRight->P[0];
@@ -227,156 +210,162 @@ void ParticleFilter::projectionLeftCB(const sensor_msgs::CameraInfo::ConstPtr &p
 };
 
 std::vector<cv::Mat> ParticleFilter::trackingTool(const cv::Mat &segmented_left, const cv::Mat &segmented_right) {
-
+	double t_step = clock();
     ros::spinOnce();
 
 	ROS_INFO("---- in tracking function ---");
-    // ROS_INFO("---- Inside tracking function ---");
 	std::vector<cv::Mat> trackingImages;
 	trackingImages.resize(2);
 
-	/***Update according to the max score***/
-
+	//Update according to the max score
 	double maxScore_1 = 0.0;
-	double maxScore_2 = 0.0;
-
 	int maxScoreIdx_1 = -1; //maximum scored particle index
-	int maxScoreIdx_2 = -1; //maximum scored particle index
-
 	double totalScore_1 = 0.0; //total score
-	double totalScore_2 = 0.0; //total score
 
 	toolImage_left_temp.setTo(0);
 	toolImage_right_temp.setTo(0);
 
-	/***do the sampling and get the matching score***/
-	for (int i = 0; i < numParticles; ++i) {
-
+    ////////////////////////PART 1: Measurement model//////////////////////////////
+    for (int i = 0; i < numParticles; ++i) {
+        //get matching score of particle i
 		matchingScores_arm_1[i] = measureFuncSameCam(toolImage_left_arm_1,toolImage_right_arm_1,particles_arm_1[i],segmented_left, segmented_right,Cam_left_arm_1,Cam_right_arm_1);
 
+        //render tool in left and right camera frame on temp image
 		newToolModel.renderTool(toolImage_left_temp, particles_arm_1[i], Cam_left_arm_1, P_left);
 		newToolModel.renderTool(toolImage_right_temp, particles_arm_1[i], Cam_right_arm_1, P_right);
 
-
+        //store total match score and largest discovered match score/index
 		if (matchingScores_arm_1[i] >= maxScore_1) {
 			maxScore_1 = matchingScores_arm_1[i];
 			maxScoreIdx_1 = i;
 		}
 		totalScore_1 += matchingScores_arm_1[i];
-
 	}
 
+    //show composite of all particles in left/right camera on temp images
 	cv::imshow("temp image arm_1 left: " , toolImage_left_temp);
 	cv::imshow("temp image arm_1 right:  " , toolImage_right_temp);
-	ROS_INFO_STREAM("Maxscore arm 1: " << maxScore_1);  //debug
+//	ROS_INFO_STREAM("Maxscore arm 1: " << maxScore_1);  //debug
 
-
-	/*** calculate weights using matching score and do the resampling ***/
-	for (int j = 0; j < numParticles; ++j) { // normalize the weights
+    //compute weights as normalized matching scores
+	for (int j = 0; j < numParticles; ++j) {
 		particleWeights_arm_1[j] = (matchingScores_arm_1[j] / totalScore_1);
 		//ROS_INFO_STREAM("weights" << particleWeights[j]);
 	}
 
+    //store the best particle (that with highest weight)
 	ToolModel::toolModel best_particle = particles_arm_1[maxScoreIdx_1];
+	ROS_INFO("Real tool at (%f %f %f): %f %f %f, ", initial.tvec_cyl(0), initial.tvec_cyl(1),initial.tvec_cyl(2),initial.rvec_cyl(0),initial.rvec_cyl(1), initial.rvec_cyl(2));
 	ROS_WARN("Particle ARM AT (%f %f %f): %f %f %f, ",best_particle.tvec_cyl(0), best_particle.tvec_cyl(1),best_particle.tvec_cyl(2),best_particle.rvec_cyl(0),best_particle.rvec_cyl(1), best_particle.rvec_cyl(2));
 
-	///showing results for each iteration here
-	//render in segmented image
+	///render the best particle on real images and show
 	newToolModel.renderTool(raw_image_left, particles_arm_1[maxScoreIdx_1], Cam_left_arm_1, P_left);
 	newToolModel.renderTool(raw_image_right, particles_arm_1[maxScoreIdx_1], Cam_right_arm_1, P_right);
-	// showing the best particle on left and right image
 	trackingImages[0] = raw_image_left.clone();
 	trackingImages[1] = raw_image_right.clone();
 	cv::imshow("trackingImages left", trackingImages[0]);
 	cv::imshow("trackingImages right", trackingImages[1]);
 
-	//each time will clear the particles and resample them, resample using low variance resampling method
+
+	//////////////////////PART 2: Resampling/////////////////////////////////////
 	std::vector<ToolModel::toolModel> oldParticles = particles_arm_1;
 	resamplingParticles(oldParticles, particleWeights_arm_1, particles_arm_1);
 
-	//std::vector<ToolModel::toolModel> updatedParticles = particles;
-	updateParticles(particles_arm_1);
+	double t1_step = clock();
 
+	float sec1 = (float) t1_step / CLOCKS_PER_SEC;
+	float sec = (float) t_step / CLOCKS_PER_SEC;
+	ROS_INFO_STREAM("Delta t = " << sec1 - sec);
+	showGazeboToolError(initial, best_particle);
+
+	/////////////////////////PART 3: Motion model////////////////////////////////
+	updateParticles(particles_arm_1);
+	cv::waitKey(20);
 	return trackingImages;
 };
 
+void ParticleFilter::showGazeboToolError(ToolModel::toolModel &real_pose, ToolModel::toolModel &bestParticle){
 
-/***** update particles to find and reach to the best pose ***/
+	//Get matrix representations of the toolModels
+	double dim = 24;
+	cv::Mat renderedMat = cv::Mat::zeros(dim,1,CV_64FC1);
+	cv::Mat real_tool_vector = cv::Mat::zeros(dim,1,CV_64FC1);
+	convertToolModeltoMatrix(bestParticle, renderedMat);
+	convertToolModeltoMatrix(real_pose, real_tool_vector);
+
+	//Find difference in pos/orientation for real_pose and particle_pose
+	cv::Mat position = real_tool_vector.rowRange(0, 12) - renderedMat.rowRange(0,12);
+	cv::Mat orientation = real_tool_vector.rowRange(12, dim) - renderedMat.rowRange(12,dim);
+	double total_pos = position.dot(position);
+	double total_ori = orientation.dot(orientation);
+	error_pos = sqrt(total_pos / 12);
+	error_ori = sqrt(total_ori / 12);
+	ROS_WARN_STREAM("Position  error: " << error_pos);
+	ROS_WARN_STREAM("orientation  error: " << error_ori);
+};
+
 void ParticleFilter::updateParticles(std::vector<ToolModel::toolModel> &updatedParticles) {
-    ///every loop should generate different particle from one base particle k
-    for (int i = 0; i < numParticles; ++i) {
-		updatedParticles[i] = newToolModel.gaussianSampling(updatedParticles[i]);  //generate new particles with new deviation
+	ROS_INFO_STREAM("down_sample_rate " << down_sample_rate); //annealing coefficient
+
+	//decrement annealing coefficient every time function is called
+	down_sample_rate -= 0.0002;
+	if(down_sample_rate < 0.0002){
+		down_sample_rate = 0.0002;
+	};
+
+	//If error is small decrement it even more
+	if(error_pos < 0.003 && error_ori < 0.005){
+		down_sample_rate = 0.0001;
+	}
+
+	//Move particles through gaussian noise motion model
+	//after resampling, first particle is best -> leave it
+    for (int i = 1; i < numParticles; ++i) {
+		updatedParticles[i] = newToolModel.gaussianSampling(updatedParticles[i], down_sample_rate);
     }
 
 };
 
-
 double ParticleFilter::measureFuncSameCam(cv::Mat & toolImage_left, cv::Mat & toolImage_right, ToolModel::toolModel &toolPose,
 		const cv::Mat &segmented_left, const cv::Mat &segmented_right, cv::Mat &Cam_left, cv::Mat &Cam_right) {
 
-	toolImage_left.setTo(0);
+	toolImage_left.setTo(0); //clear the left and right images
 	toolImage_right.setTo(0);
 
-	/***do the sampling and get the matching score***/
-	//first get the rendered image using 3d model of the tool
-	newToolModel.renderTool(toolImage_left, toolPose, Cam_left, P_left);
-	double left = newToolModel.calculateChamferScore(toolImage_left, segmented_left);  //get the matching score
+	newToolModel.renderTool(toolImage_left, toolPose, Cam_left, P_left); //render particle's pose of tool on left image in left camera's frame
+	double left = newToolModel.calculateChamferScore(toolImage_left, segmented_left);  //get the matching score between particle pose and segmented pose
 
-	newToolModel.renderTool(toolImage_right, toolPose, Cam_right, P_right);
-	double right = newToolModel.calculateChamferScore(toolImage_right, segmented_right);
+	newToolModel.renderTool(toolImage_right, toolPose, Cam_right, P_right);//render particle's pose of tool on right image in right camera's frame
+	double right = newToolModel.calculateChamferScore(toolImage_right, segmented_right); //get the matching score between particle pose and segmented pose
 
 	double matchingScore = sqrt(pow(left, 2) + pow(right, 2));
 
 	return matchingScore;
 };
 
-cv::Mat ParticleFilter::adjoint(cv::Mat &G) {
-	cv::Mat adjG = cv::Mat::zeros(6, 6, CV_64F);
-
-	cv::Mat Rot = G.colRange(0, 3).rowRange(0, 3);
-	cv::Mat p = G.colRange(3, 4).rowRange(0, 3);
-
-	cv::Mat p_skew = newToolModel.computeSkew(p);
-	//upper right corner
-	cv::Mat temp = p_skew * Rot;
-	Rot.copyTo(adjG.colRange(0, 3).rowRange(0, 3));
-	Rot.copyTo(adjG.colRange(3, 6).rowRange(3, 6));
-	temp.copyTo(adjG.colRange(3, 6).rowRange(0, 3));
-	return adjG;
-};
-
-/**** resampling method ****/
 void ParticleFilter::resamplingParticles(const std::vector<ToolModel::toolModel> &sampleModel,
 										 const std::vector<double> &particleWeight,
 										 std::vector<ToolModel::toolModel> &update_particles) {
-
 	int M = sampleModel.size(); //total number of particles
-	double max = 1.0 / M;
+	double max = 1.0 / M; //uniform probability of drawing a particle
 
-	double r = newToolModel.randomNum(0.0, max);
+	double r = newToolModel.randomNum(0.0, max); //random double between 0 and max
 	double w = particleWeight[0]; //first particle weight
 	int idx = 0;
 
-	update_particles.clear(); ///start fresh
+	update_particles.clear(); //clear new particles
 
 	for (int i = 0; i < M; ++i) {
-
 		double U = r + ((double) (i - 1) * max);
-
 		while (U > w) {
 			idx += 1;
 			w = w + particleWeight[idx];
 		}
-
 		update_particles.push_back(sampleModel[idx]);
 	}
-
 };
 
 void ParticleFilter::computeRodriguesVec(const Eigen::Affine3d & trans, cv::Mat rot_vec){
-//	Eigen::Vector3d rpy = trans.rotation().eulerAngles(0, 1, 2);
-//	ROS_INFO_STREAM("RPY " << rpy);
-
     Eigen::Matrix3d rot_affine = trans.rotation();
 
     cv::Mat rot(3,3,CV_64FC1);
@@ -395,7 +384,6 @@ void ParticleFilter::computeRodriguesVec(const Eigen::Affine3d & trans, cv::Mat 
     //ROS_INFO_STREAM("rot_vec " << rot_vec);
 };
 
-/******from eigen to opencv matrix****/
 void ParticleFilter::convertEigenToMat(const Eigen::Affine3d & trans, cv::Mat & outputMatrix){
 
     outputMatrix = cv::Mat::eye(4,4,CV_64FC1);
@@ -429,77 +417,36 @@ void ParticleFilter::convertEigenToMat(const Eigen::Affine3d & trans, cv::Mat & 
 
 };
 
-/*** one possible motion model for tool in image frame, update particles based on given spatial velocity ***/
-void ParticleFilter::updateSamples(const cv::Mat &bodyVel, double &updateRate, std::vector<ToolModel::toolModel> particles) {
+void ParticleFilter::convertToolModeltoMatrix(const ToolModel::toolModel &inputToolModel, cv::Mat &toolMatrix){
+	toolMatrix.at<double>(0,0) = inputToolModel.tvec_cyl(0);
+	toolMatrix.at<double>(1,0) = inputToolModel.tvec_cyl(1);
+	toolMatrix.at<double>(2,0) = inputToolModel.tvec_cyl(2);
 
-	cv::Mat Rot = cv::Mat::zeros(3, 3, CV_64F);
-	cv::Mat p = cv::Mat::zeros(3, 1, CV_64F);
-	cv::Mat particleFrame = cv::Mat::eye(4, 4, CV_64F);
+	toolMatrix.at<double>(3,0) = inputToolModel.tvec_elp(0);
+	toolMatrix.at<double>(4,0) = inputToolModel.tvec_elp(1);
+	toolMatrix.at<double>(5,0) = inputToolModel.tvec_elp(2);
 
-	cv::Mat spatialVel = cv::Mat::zeros(6, 1, CV_64F);
-	cv::Mat updatedParticleFrame = cv::Mat::eye(4, 4, CV_64F);
+	toolMatrix.at<double>(6,0) = inputToolModel.tvec_grip1(0);
+	toolMatrix.at<double>(7,0) = inputToolModel.tvec_grip1(1);
+	toolMatrix.at<double>(8,0) = inputToolModel.tvec_grip1(2);
 
-	cv::Mat I = cv::Mat::eye(3, 3, CV_64F);
+	toolMatrix.at<double>(9,0) = inputToolModel.tvec_grip2(0);
+	toolMatrix.at<double>(10,0) = inputToolModel.tvec_grip2(1);
+	toolMatrix.at<double>(11,0) = inputToolModel.tvec_grip2(2);
 
-	for (int k = 0; k < particles.size(); ++k) {
+	toolMatrix.at<double>(12,0) = inputToolModel.rvec_cyl(0);
+	toolMatrix.at<double>(13,0) = inputToolModel.rvec_cyl(1);
+	toolMatrix.at<double>(14,0) = inputToolModel.rvec_cyl(2);
 
-		cv::Rodrigues(particles[k].rvec_cyl, Rot); //get rotation mat from cylinder
-		p.at<double>(0, 0) = particles[k].tvec_cyl(0); //get translation vec from cylinder
-		p.at<double>(1, 0) = particles[k].tvec_cyl(1);
-		p.at<double>(2, 0) = particles[k].tvec_cyl(2);
+	toolMatrix.at<double>(15,0) = inputToolModel.rvec_elp(0);
+	toolMatrix.at<double>(16,0) = inputToolModel.rvec_elp(1);
+	toolMatrix.at<double>(17,0) = inputToolModel.rvec_elp(2);
 
-		Rot.copyTo(particleFrame.colRange(0, 3).rowRange(0, 3));
-		p.copyTo(particleFrame.colRange(3, 4).rowRange(0, 3));
+	toolMatrix.at<double>(18,0) = inputToolModel.rvec_grip1(0);
+	toolMatrix.at<double>(19,0) = inputToolModel.rvec_grip1(1);
+	toolMatrix.at<double>(20,0) = inputToolModel.rvec_grip1(2);
 
-		//calculate spatial velocity
-		spatialVel = adjoint(particleFrame) * bodyVel;
-		// spatialVel = addNoise(spatialVel);
-
-		cv::Mat v = spatialVel.colRange(0, 1).rowRange(0, 3); //translation velocity
-		cv::Mat w = spatialVel.colRange(0, 1).rowRange(3, 6); //rotational velocity
-
-		cv::Mat move = cv::Mat::eye(4, 4, CV_64F);
-
-		if (w.at<double>(2, 0) == 0.0) {  //TODO: pure translation ??
-			cv::Mat vdt = v * updateRate;
-			vdt.copyTo(move.colRange(3, 4).rowRange(0, 3));
-		} else {
-			cv::Mat vtil = v * updateRate;
-			cv::Mat wtil = w * updateRate;
-
-			double M = cv::norm(wtil);
-			cv::Mat v_bar = vtil / M;  //h = w*v//||w||^2
-			cv::Mat w_bar = wtil / M;
-
-			cv::Mat w_hat = newToolModel.computeSkew(w_bar);
-			cv::Mat rotation = I + w_hat * sin(M) + (w_hat * w_hat) * (1 - cos(M));
-			cv::Mat trans = (I - rotation) * (w_bar.cross(v_bar) + w_bar * w_bar.t() * v_bar * M);
-
-			rotation.copyTo(move.colRange(0, 3).rowRange(0, 3));
-			trans.copyTo(move.colRange(3, 4).rowRange(0, 3));
-		}
-
-		/***update the cylinder pose***/
-		updatedParticleFrame = move * particleFrame;
-
-		//convert rotation matrix to Rodrigues
-		cv::Mat tempR = cv::Mat::zeros(3, 3, CV_64F);
-		cv::Mat updateR = cv::Mat::zeros(3, 1, CV_64F);
-		cv::Mat updateT = cv::Mat::zeros(3, 1, CV_64F);
-
-		updateT = updatedParticleFrame.colRange(3, 4).rowRange(0, 3);
-		tempR = updatedParticleFrame.colRange(0, 3).rowRange(0, 3);
-		cv::Rodrigues(tempR, updateR);
-
-		particles[k].tvec_cyl(0) = updateT.at<double>(0, 0);
-		particles[k].tvec_cyl(1) = updateT.at<double>(1, 0);
-		particles[k].tvec_cyl(2) = updateT.at<double>(2, 0);
-		particles[k].rvec_cyl(0) = updateR.at<double>(0, 0);
-		particles[k].rvec_cyl(1) = updateR.at<double>(1, 0);
-		particles[k].rvec_cyl(2) = updateR.at<double>(2, 0);
-
-		/***according to the cylinder pose, update ellipse and grippers pose***/
-		//newToolModel.computeDavinciPose(particles[k], 0.0, 0.0, 0.0); // no need to change relative angles??? TODO:
-
-	}
+	toolMatrix.at<double>(21,0) = inputToolModel.rvec_grip2(0);
+	toolMatrix.at<double>(22,0) = inputToolModel.rvec_grip2(1);
+	toolMatrix.at<double>(23,0) = inputToolModel.rvec_grip2(2);
 };
