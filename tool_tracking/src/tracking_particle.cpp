@@ -6,10 +6,6 @@
 
 
 bool freshImage;
-bool freshCameraInfo;
-bool freshVelocity;
-
-double Arr[6];
 
 using namespace std;
 using namespace cv_projective;
@@ -31,19 +27,6 @@ void newImageCallback(const sensor_msgs::ImageConstPtr &msg, cv::Mat *outputImag
 
 }
 
-// receive body velocity
-// still not sure if this does anything.
-void arrayCallback(const std_msgs::Float64MultiArray::ConstPtr &array) {
-	int i = 0;
-	// print all the remaining numbers
-	for (std::vector<double>::const_iterator it = array->data.begin(); it != array->data.end(); ++it) {
-		Arr[i] = *it;
-		i++;
-	}
-
-	freshVelocity = true;
-}
-
 cv::Mat segmentation(cv::Mat &InputImg) {
 
 	cv::Mat src, src_gray;
@@ -54,7 +37,7 @@ cv::Mat segmentation(cv::Mat &InputImg) {
 
 	resize(src, src, cv::Size(), 1, 1);
 
-	double lowThresh = 20;
+	double lowThresh = 28;
 
 	cv::cvtColor(src, src_gray, CV_BGR2GRAY);
 
@@ -76,7 +59,6 @@ int main(int argc, char **argv) {
 	/******  initialization  ******/
 	ParticleFilter Particles(&nh);
 
-    freshCameraInfo = false;
     freshImage = false;
     //freshVelocity = false;//Moving all velocity-related things inside of the kalman.
 
@@ -112,16 +94,16 @@ int main(int argc, char **argv) {
             Particles.raw_image_left = rawImage_left.clone();
             Particles.raw_image_right = rawImage_right.clone();
 
-            seg_left = segmentation(rawImage_left);  //or use image_vessselness
+            seg_left = segmentation(rawImage_left);
             seg_right = segmentation(rawImage_right);
 
-			cv::imshow("seg left ", seg_left);
-            cv::imshow("seg right ", seg_right);
+            cv::imshow("seg left: ",seg_left );
+            cv::imshow("seg right: ",seg_right );  
 
-            trackingImgs = Particles.trackingTool(seg_left, seg_right); //with rendered tool and segmented img
+            Particles.trackingTool(seg_left, seg_right); //with rendered tool and segmented img
 
 			freshImage = false;
-			freshVelocity = false;
+
 		}
 
 	}

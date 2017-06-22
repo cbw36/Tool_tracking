@@ -77,11 +77,10 @@ private:
 
 	ros::NodeHandle node_handle;
 
-	ToolModel newToolModel;
-	/**
-	 * @brief predicted_real_pose is used to get the predicted real tool pose from using the forward kinematics
-	 */
-	ToolModel::toolModel predicted_real_pose;
+	///ros::Timer timer;
+
+	ToolModel newToolModel;  /// it should be set up the first time, probably need updates of the camera poses
+	ToolModel::toolModel initial; //initial configuration
 
 	unsigned int numParticles; //total number of particles
 
@@ -97,7 +96,7 @@ private:
 	std::vector<double> matchingScores_arm_1; // particle scores (matching scores)
 	std::vector<double> matchingScores_arm_2; // particle scores (matching scores)
 
-	std::vector<std::vector <double> > particles_arm_1; // particles
+	std::vector<ToolModel::toolModel> particles_arm_1; // particles
 	std::vector<double> particleWeights_arm_1; // particle weights calculated from matching scores
 
 	std::vector<ToolModel::toolModel> particles_arm_2; // particles
@@ -125,12 +124,6 @@ private:
 	ros::Subscriber projectionMat_subscriber_l;
 	bool freshCameraInfo;
 
-	double t_step;
-	double t_1_step;
-
-    double down_sample_rate;
-    double error;
-
 public:
 
 	/*
@@ -153,59 +146,45 @@ public:
 	~ParticleFilter();
 
 	/*
-	 * The initializeParticles initializes the particles by setting the total number of particles, initial
-	 * guess and randomly generating the particles around the initial guess.
-	 */
+	* The initializeParticles initializes the particles by setting the total number of particles, initial
+	* guess and randomly generating the particles around the initial guess.
+	*/
 	void initializeParticles();
 
-/**
- * @brief get a coarse initialzation using forward kinematics
- */
-    void getCoarseGuess();
+	/***consider getting a timer to debug***/
+	// void timerCallback(const ros::TimerEvent&);
 
-/**
- * @brief Main tracking function
- * @param segmented_left : segmented image for left camera
- * @param segmented_right : segmented image for right camera
- * @return
- */
-	void trackingTool(const cv::Mat &segmented_left, const cv::Mat &segmented_right);
-/**
- * @brief low variance resampling
- * @param sampleModel : input particles
- * @param particleWeight : input normalized weights
- * @param update_particles : output particles
- */
-	void resamplingParticles(const std::vector< std::vector<double> > &sampleModel,
+	/*
+	 * This is the main function for tracking the needle. This function is called and it syncs all of the functions
+	*/
+	std::vector<cv::Mat> trackingTool(const cv::Mat &segmented_left, const cv::Mat &segmented_right);
+	/*
+	 * resampling method
+	 */
+/*	void
+	resampleLowVariance(const std::vector<ToolModel::toolModel> &initial, const std::vector<double> &particleWeight,
+						std::vector<ToolModel::toolModel> &results);*/
+	void resamplingParticles(const std::vector<ToolModel::toolModel> &sampleModel,
 							 const std::vector<double> &particleWeight,
-							 std::vector<std::vector<double> > &update_particles);
-/**
- * @brief get the p(z_t|x_t), compute the matching score based on the camera view image and rendered image
- * @param toolImage_left
- * @param toolImage_right
- * @param toolPose
- * @param segmented_left
- * @param segmented_right
- * @param Cam_left
- * @param Cam_right
- * @return matching score using matching functions: chamfer matching
- */
+							 std::vector<ToolModel::toolModel> &update_particles);
+
+	/*
+	 * get measuerment for two tools
+	 */
 	double measureFuncSameCam(cv::Mat & toolImage_left, cv::Mat & toolImage_right, ToolModel::toolModel &toolPose,
 							  const cv::Mat &segmented_left, const cv::Mat &segmented_right, cv::Mat &Cam_left, cv::Mat &Cam_right);
-/**
- * @brief Motion model, propagte the particles using velocity computed from joint sensors
- * @param best_particle_last: last time step best particle, used to compute the nominal velocity
- * @param updatedParticles : input and output particles
- */
-	void updateParticles(std::vector <double> &best_particle_last, double &maxScore, std::vector<std::vector <double> > &updatedParticles, ToolModel::toolModel & predicted_real_pose);
+	/*
+	 * update particles
+	 */
+	void updateSamples(const cv::Mat &bodyVel, double &updateRate, std::vector<ToolModel::toolModel> particles);
 
-	void computeNoisedParticles(std::vector <double> & inputParticle, std::vector< std::vector <double> > & noisedParticles);
+	void updateParticles(std::vector<ToolModel::toolModel> &updateParticles, const ToolModel::toolModel &bestParticle);
 
-	void showGazeboToolError(ToolModel::toolModel &real_pose, ToolModel::toolModel &bestParticle);
 
-	void convertToolModeltoMatrix(const ToolModel::toolModel &inputToolModel, cv::Mat &toolMatrix);
-	void computeRodriguesVec(const Eigen::Affine3d & trans, cv::Mat rot_vec);
-	void convertEigenToMat(const Eigen::Affine3d & trans, cv::Mat & outputMatrix);
+	cv::Mat adjoint(cv::Mat &G);
+    void computeRodriguesVec(const Eigen::Affine3d & trans, cv::Mat rot_vec);
+    void convertEigenToMat(const Eigen::Affine3d & trans, cv::Mat & outputMatrix);
+
 };
 
 #endif
