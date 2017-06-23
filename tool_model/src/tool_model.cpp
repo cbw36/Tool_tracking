@@ -50,12 +50,12 @@ boost::mt19937 rng((const uint32_t &) time(0));
 
 ToolModel::ToolModel() {
 
-    ///adjust the model params according to the tool geometry
+    ///offset the model's values according to the tool geometry.  values from testing
     offset_body = 0.4530; //0.4560
     offset_ellipse = offset_body;
     offset_gripper = offset_ellipse+ 0.007;
 
-    /****initialize the vertices fo different part of tools****/
+    //get path to tool package
     tool_model_pkg = ros::package::getPath("tool_model");
 
     std::string cylinder = tool_model_pkg + "/tool_parts/cyliner_tense_end_face.obj"; //"/tense_cylinde_2.obj", test_cylinder_3, cyliner_tense_end_face, refine_cylinder_3
@@ -85,13 +85,12 @@ ToolModel::ToolModel() {
     getFaceInfo(griper1_faces, griper1_Vpts, griper1_Npts, gripper1Face_normal, gripper1Face_centroid);
     getFaceInfo(griper2_faces, griper2_Vpts, griper2_Npts, gripper2Face_normal, gripper2Face_centroid);
 
-    /* prepare to get the oval normals for UKF */
-    std::string oval_normal = tool_model_pkg + "/tool_parts/new_less_normal.obj";  //contains only the faces with useful normals
+    //get oval normals for UKF
+    std::string oval_normal = tool_model_pkg + "/tool_parts/new_less_normal.obj";  //contains only the faces with useful normals from refine_ellipse_3.obj file
     load_model_vertices(oval_normal.c_str(),
                         oval_normal_vertices, oval_normal_Vnormal, oval_normal_faces, oval_normal_neighbors);
     modify_model_(oval_normal_vertices, oval_normal_Vnormal, oval_normal_Vpts, oval_normal_Npts, offset_ellipse, oval_normal_Vmat, oval_normal_Nmat);
     getFaceInfo(oval_normal_faces, oval_normal_Vpts, oval_normal_Npts, oval_normalFace_normal, oval_normalFace_centroid);
-
 
     srand((unsigned) time(NULL)); //for the random number generator, use only once
 };
@@ -105,7 +104,6 @@ double ToolModel::randomNumber(double stdev, double mean) {
     return d;
 
 };
-
 
 double ToolModel::randomNum(double min, double max){
 
@@ -139,38 +137,46 @@ void ToolModel::load_model_vertices(const char *path, std::vector<glm::vec3> &ou
     std::vector<int> temp_face;
     temp_face.resize(6);  //need three vertex and corresponding normals
 
+    //Open OBJ file
     FILE *file = fopen(path, "r");
     if (file == NULL) {
         printf("Impossible to open the file ! Are you in the right path ?\n");
         return;
     }
 
+    //Read OBJ file for its vertices, textures, normals, and faces
     while (1) {
 
         char lineHeader[128];
         // read the first word of the line
         int res = fscanf(file, "%s", lineHeader);
         if (res == EOF)
-            break; // EOF = End Of File. Quit the loop.
-
+            break;  // EOF = End Of File. Quit the loop.
         // else : parse lineHeader
+
+        //if vertex, get the <x,y,z> coords
         if (strcmp(lineHeader, "v") == 0) {
             glm::vec3 vertex;
 
             fscanf(file, "%f %f %f\n", &vertex.x, &vertex.y, &vertex.z);
             //temp_vertices.push_back(vertex);
             out_vertices.push_back(vertex);
+
+        //if vertex texture, get <x,y> dir of texture
         } else if (strcmp(lineHeader, "vt") == 0) {
             glm::vec2 uv;
             fscanf(file, "%f %f\n", &uv.x, &uv.y);
             // cout<<"uv"<<uv.x<<endl;
             temp_uvs.push_back(uv);
+
+        // if vertex normal, get <x,y,z> coords
         } else if (strcmp(lineHeader, "vn") == 0) {
             glm::vec3 normal;
             fscanf(file, "%f %f %f\n", &normal.x, &normal.y, &normal.z);
             //temp_normals.push_back(normal);
             vertex_normal.push_back(normal);
 
+        //if face, get its 3 groups of <vertex, normal> and push back the face and the vert/texture/normals separately
         } else if (strcmp(lineHeader, "f") == 0) {
 
             unsigned int vertexIndex[3], uvIndex[3], normalIndex[3];
@@ -180,8 +186,6 @@ void ToolModel::load_model_vertices(const char *path, std::vector<glm::vec3> &ou
             if (matches != 9) {
                 ROS_ERROR("File can't be read by our simple parser : ( Try exporting with other options\n");
             }
-
-            /* this mean for later use, just in case */
             vertexIndices.push_back(vertexIndex[0]);
             vertexIndices.push_back(vertexIndex[1]);
             vertexIndices.push_back(vertexIndex[2]);
@@ -203,17 +207,15 @@ void ToolModel::load_model_vertices(const char *path, std::vector<glm::vec3> &ou
         }
     }
 
-    /***find neighbor faces***/
+    //Find neighbor faces from out_faces
     neighbor_faces.resize(out_faces.size());
     std::vector<int> temp_vec;
 
     for (int i = 0; i < neighbor_faces.size(); ++i) {
-        /*********find the neighbor faces************/
         for (int j = 0; j < out_faces.size(); ++j) {
-            if (j != i) {  //don't repeat yourself
+            if (j != i) {  //no repeats
                 int match = Compare_vertex(out_faces[i], out_faces[j], temp_vec);
-
-                if (match == 2) //so face i and face j share an edge
+                if (match == 2) //face i and face j share an edge
                 {
                     //ROS_INFO_STREAM("SIZE FO THE TEMP VEC: " << temp_vec.size() );
                     neighbor_faces[i].push_back(j); // mark the neighbor face index
@@ -225,9 +227,7 @@ void ToolModel::load_model_vertices(const char *path, std::vector<glm::vec3> &ou
                 }
                 temp_vec.clear();
             }
-
         }
-
     }
 
     printf("loaded file %s successfully.\n", path);
@@ -267,18 +267,12 @@ void ToolModel::Convert_glTocv_pts(std::vector<glm::vec3> &input_vertices, std::
     }
 };
 
-
-/* find the camera view point, should it be (0,0,0), input faces stores the indices of the vertices and normals,
-which are not related to the pose of the tool object*/
-/*** TODO: camera transformations ***/
 cv::Mat ToolModel::camTransformMats(cv::Mat &cam_mat, cv::Mat &input_mat) {
-    /*cam mat should be a 4x4 extrinsic parameter*/
     cv::Mat output_mat = cam_mat * input_mat; //transform the obj to camera frames, g_CT
 
     return output_mat;
 };
 
-/*************** using Vertices to draw the contour *******************/
 void ToolModel::Compute_Silhouette(const std::vector<std::vector<int> > &input_faces,
                                    const std::vector<std::vector<int> > &neighbor_faces,
                                    const cv::Mat &input_Vmat, const cv::Mat &input_Nmat,
@@ -292,23 +286,24 @@ void ToolModel::Compute_Silhouette(const std::vector<std::vector<int> > &input_f
    // cv::Mat temp_input_Vmat = adjoint_mat * input_Vmat;
    // cv::Mat temp_input_Nmat = adjoint_mat * input_Nmat;
 
-    cv::Mat new_Vertices = transformPoints(input_Vmat, rvec, tvec);
+    //Transform vertices/normals from offline pose to pose in camera frame
+    cv::Mat new_Vertices = transformPoints(input_Vmat, rvec, tvec); //transform points from offline pose to real pose corresponding to rot/trans vecs
+    new_Vertices = camTransformMats(CamMat, new_Vertices); //transform points to camera frame
+    cv::Mat new_Normals = transformPoints(input_Nmat, rvec, tvec);  //transform normals from offline pose to real pose corresponding to rot/trans vecs
+    new_Normals = camTransformMats(CamMat, new_Normals); //transform normals to camera frame
 
-    new_Vertices = camTransformMats(CamMat, new_Vertices); //transform every point under camera frame
-
-    cv::Mat new_Normals = transformPoints(input_Nmat, rvec, tvec);
-    new_Normals = camTransformMats(CamMat, new_Normals); //transform every surface normal under camera frame
 
     unsigned long neighbor_num = 0;
     cv::Mat temp(4, 1, CV_64FC1);
-
-    cv::Mat ept_1(4, 1, CV_64FC1);
-    cv::Mat ept_2(4, 1, CV_64FC1);
+    cv::Mat ept_1(4, 1, CV_64FC1);// edge point 1
+    cv::Mat ept_2(4, 1, CV_64FC1);// edge point 2
 
     for (int i = 0; i < input_faces.size(); ++i) {
-        neighbor_num = (neighbor_faces[i].size()) / 5;  //each neighbor has two vertices, used to be 3 when normals
+        neighbor_num = (neighbor_faces[i].size()) / 5;   //total number of neighbors to the given face (divide by 5 bc each neighbor has 5 fields)
 
+        //If i'th face has neighbors, analyze it
         if (neighbor_num > 0) {
+            //store indices of the vertices/normals which define face i
             int v1 = input_faces[i][0];
             int v2 = input_faces[i][1];
             int v3 = input_faces[i][2];
@@ -316,13 +311,13 @@ void ToolModel::Compute_Silhouette(const std::vector<std::vector<int> > &input_f
             int n2 = input_faces[i][4];
             int n3 = input_faces[i][5];
 
+            //convert vertices and normals to cv::Point3d using the temp matrix
             new_Vertices.col(v1).copyTo(temp.col(0));
             cv::Point3d pt1 = convert_MattoPts(temp);
             new_Vertices.col(v2).copyTo(temp.col(0));
             cv::Point3d pt2 = convert_MattoPts(temp);
             new_Vertices.col(v3).copyTo(temp.col(0));
             cv::Point3d pt3 = convert_MattoPts(temp);
-
             new_Normals.col(n1).copyTo(temp.col(0));
             cv::Point3d vn1 = convert_MattoPts(temp);
             new_Normals.col(n2).copyTo(temp.col(0));
@@ -330,32 +325,33 @@ void ToolModel::Compute_Silhouette(const std::vector<std::vector<int> > &input_f
             new_Normals.col(n3).copyTo(temp.col(0));
             cv::Point3d vn3 = convert_MattoPts(temp);
 
-            cv::Point3d fnormal = FindFaceNormal(pt1, pt2, pt3, vn1, vn2, vn3); //knowing the direction and normalized
-            cv::Point3d face_point_i = pt1 + pt2 + pt3;
+            //Get the face's normal vector and vector from camera to face
+            cv::Point3d fnormal = FindFaceNormal(pt1, pt2, pt3, vn1, vn2, vn3);
+            cv::Point3d face_point_i = pt1 + pt2 + pt3; // find center of face WRT camera frame
             face_point_i.x = face_point_i.x / 3;
             face_point_i.y = face_point_i.y / 3;
             face_point_i.z = face_point_i.z / 3;
 
-            double isfront_i = dotProduct(fnormal, face_point_i);
-            if(isfront_i < 0.000){
+            double isfront_i = dotProduct(fnormal, face_point_i);//if >0, it is a front face
+            if(isfront_i < 0.000){ //only draw edge if its a front face
                 for (int neighbor_count = 0; neighbor_count <
-                                             neighbor_num; ++neighbor_count) {  //notice: cannot use J here, since the last j will not be counted
-                    int j = 5 * neighbor_count;
+                                             neighbor_num; ++neighbor_count) {  //iterate through all neighbor faces
+                    //get current neighbors vertices/normals
+                    int j = 5 * neighbor_count; //neighbor count= number of neighbors, but each neighbor has 5 fields, so it couldnt be used as an index
                     int v1_ = input_faces[neighbor_faces[i][j]][0];
                     int v2_ = input_faces[neighbor_faces[i][j]][1];
                     int v3_ = input_faces[neighbor_faces[i][j]][2];
-
                     int n1_ = input_faces[neighbor_faces[i][j]][3];
                     int n2_ = input_faces[neighbor_faces[i][j]][4];
                     int n3_ = input_faces[neighbor_faces[i][j]][5];
 
+                    //convert to cv::Point3d
                     new_Vertices.col(v1_).copyTo(temp.col(0));
                     cv::Point3d pt1_ = convert_MattoPts(temp);
                     new_Vertices.col(v2_).copyTo(temp.col(0));
                     cv::Point3d pt2_ = convert_MattoPts(temp);
                     new_Vertices.col(v3_).copyTo(temp.col(0));
                     cv::Point3d pt3_ = convert_MattoPts(temp);
-
                     new_Normals.col(n1_).copyTo(temp.col(0));
                     cv::Point3d vn1_ = convert_MattoPts(temp);
                     new_Normals.col(n2_).copyTo(temp.col(0));
@@ -363,38 +359,34 @@ void ToolModel::Compute_Silhouette(const std::vector<std::vector<int> > &input_f
                     new_Normals.col(n3_).copyTo(temp.col(0));
                     cv::Point3d vn3_ = convert_MattoPts(temp);
 
+                    //Get the face's normal vector and vector from camera to face
                     cv::Point3d fnormal_n = FindFaceNormal(pt1_, pt2_, pt3_, vn1_, vn2_, vn3_);
-
                     cv::Point3d face_point_j = pt1_ + pt2_ + pt3_;
                     face_point_j.x = face_point_j.x / 3;
                     face_point_j.y = face_point_j.y / 3;
                     face_point_j.z = face_point_j.z / 3;
 
-                    double isfront_j = dotProduct(fnormal_n, face_point_j);
+                    double isfront_j = dotProduct(fnormal_n, face_point_j);//determine if neighbor face is front or back
 
-                    if (isfront_i * isfront_j <= 0.0) // one is front, another is back
-                    {
-                        /*finish finding, drawing the image*/
-                        new_Vertices.col(neighbor_faces[i][j + 1]).copyTo(ept_1);  //under camera frames
+                    if (isfront_i * isfront_j <= 0.0) //if one is front, another is back
+                    {//project the edge and draw it
+
+                        //project edge under camera frame
+                        new_Vertices.col(neighbor_faces[i][j + 1]).copyTo(ept_1);
                         new_Vertices.col(neighbor_faces[i][j + 3]).copyTo(ept_2);
-
                         cv::Point2d prjpt_1 = reproject(ept_1, P);
                         cv::Point2d prjpt_2 = reproject(ept_2, P);
                         if (prjpt_1.x <= 640 && prjpt_1.x >= -100 && prjpt_2.x < 640 && prjpt_2.x >= -100)
-                        {
+                        {//draw edge line
                             cv::line(image, prjpt_1, prjpt_2, cv::Scalar(255, 255, 255), 1, 8, 0);  
                         }
-
                     }
                 }
             }
-
         }
     }
-
 };
 
-/*************** extract contour and the vertex normal for measurement model *******************/
 void ToolModel::Compute_Silhouette_UKF(const std::vector<std::vector<int> > &input_faces,
                                    const std::vector<std::vector<int> > &neighbor_faces,
                                    const cv::Mat &input_Vmat, const cv::Mat &input_Nmat,
@@ -559,6 +551,7 @@ void ToolModel::getFaceInfo(const std::vector<std::vector<int> > &input_faces,
     face_centroids = cv::Mat(4, face_size, CV_64FC1);
 
     for (int i = 0; i < face_size; ++i) {
+        //Get indices of v1,v2,v3,n1,n2,n3 WRT vertices/normals lists
         int v1 = input_faces[i][0];
         int v2 = input_faces[i][1];
         int v3 = input_faces[i][2];
@@ -566,36 +559,33 @@ void ToolModel::getFaceInfo(const std::vector<std::vector<int> > &input_faces,
         int n2 = input_faces[i][4];
         int n3 = input_faces[i][5];
 
+        //get the values for v1,v2,v3,n1,n2,n3 from vertices/normals lists
         cv::Point3d pt1 = input_vertices[v1];
         cv::Point3d pt2 = input_vertices[v2];
         cv::Point3d pt3 = input_vertices[v3];
-
         cv::Point3d normal1 = input_Vnormal[n1];
         cv::Point3d normal2 = input_Vnormal[n2];
         cv::Point3d normal3 = input_Vnormal[n3];
 
+        //Compute face normal given v1,v2,v3,n1,n2,n3
         cv::Point3d fnormal = FindFaceNormal(pt1, pt2, pt3, normal1, normal2,
                                              normal3); //knowing the direction and normalized
-
         face_normals.at<double>(0, i) = fnormal.x;
         face_normals.at<double>(1, i) = fnormal.y;
         face_normals.at<double>(2, i) = fnormal.z;
         face_normals.at<double>(3, i) = 0;
 
+        //Compute face centroid given face normal
         cv::Point3d face_point = pt1 + pt2 + pt3;
-
         face_point.x = face_point.x / 3.000000;
         face_point.y = face_point.y / 3.000000;
         face_point.z = face_point.z / 3.000000;
         face_point = Normalize(face_point);
-
         face_centroids.at<double>(0, i) = face_point.x;
         face_centroids.at<double>(1, i) = face_point.y;
         face_centroids.at<double>(2, i) = face_point.z;
         face_centroids.at<double>(3, i) = 1;
-
     }
-
 };
 
 cv::Point3d ToolModel::crossProduct(cv::Point3d &vec1, cv::Point3d &vec2) {    //3d vector
@@ -646,17 +636,16 @@ cv::Point3d ToolModel::FindFaceNormal(cv::Point3d &input_v1, cv::Point3d &input_
     temp_v2.y = input_v1.y - input_v3.y;
     temp_v2.z = input_v1.z - input_v3.z;
 
-    cv::Point3d res = crossProduct(temp_v1, temp_v2);
+    cv::Point3d res = crossProduct(temp_v1, temp_v2); //output cross product of v1 v2
 
+    //determine sign of output
     double outward_normal_1 = dotProduct(res, input_n1);
     double outward_normal_2 = dotProduct(res, input_n2);
     double outward_normal_3 = dotProduct(res, input_n3);
     if ((outward_normal_1 < 0) || (outward_normal_2 < 0) || (outward_normal_3 < 0)) {
         res = -res;
     }
-
     return res;  // knowing the direction
-
 };
 
 
@@ -700,23 +689,25 @@ int ToolModel::Compare_vertex(std::vector<int> &vec1, std::vector<int> &vec2, st
     return match_count;
 };
 
-/*******This function is to do transformations to the raw data from the loader, to offset each part*******/
 void ToolModel::modify_model_(std::vector<glm::vec3> &input_vertices, std::vector<glm::vec3> &input_Vnormal,
                               std::vector<cv::Point3d> &input_Vpts, std::vector<cv::Point3d> &input_Npts,
                               double &offset, cv::Mat &input_Vmat, cv::Mat &input_Nmat) {
 
+    //convert vertices from glm to cv::Point3d
     Convert_glTocv_pts(input_vertices, input_Vpts);
     ConvertInchtoMeters(input_Vpts);
 
+    //incorporate offset from tool origin to part origin
     int size = input_Vpts.size();
     for (int i = 0; i < size; ++i) {
         input_Vpts[i].y = input_Vpts[i].y - offset;
     }
+    //convert normals from glm to cv::Point3d
     Convert_glTocv_pts(input_Vnormal, input_Npts); //not using homogeneous for v weight now
     ConvertInchtoMeters(input_Npts);
 
+    //convert vertices from cv::Point3d to cv::mat
     input_Vmat = cv::Mat(4, size, CV_64FC1);
-
     for (int i = 0; i < size; ++i) {
         input_Vmat.at<double>(0, i) = input_Vpts[i].x;
         input_Vmat.at<double>(1, i) = input_Vpts[i].y;
@@ -724,51 +715,42 @@ void ToolModel::modify_model_(std::vector<glm::vec3> &input_vertices, std::vecto
         input_Vmat.at<double>(3, i) = 1;
     }
 
+    //convert normals from cv::Point3d to cv::mat
     int Nsize = input_Npts.size();
     input_Nmat = cv::Mat(4, Nsize, CV_64FC1);
-
     for (int i = 0; i < Nsize; ++i) {
         input_Nmat.at<double>(0, i) = input_Npts[i].x;
         input_Nmat.at<double>(1, i) = input_Npts[i].y;
         input_Nmat.at<double>(2, i) = input_Npts[i].z;
         input_Nmat.at<double>(3, i) = 0;
     }
-
 };
 
-/*This function is to generate a tool model, contains the following info:
-translation, rotation, new z axis, new x axis*/
-//TODO:
-ToolModel::toolModel
-ToolModel::setRandomConfig(const toolModel &seeds, const double &theta_cylinder, const double &theta_oval, const double &theta_open, double &step){
+ToolModel::toolModel ToolModel::setRandomConfig(const toolModel &seeds, const double &theta_cylinder, const double &theta_oval, const double &theta_open, double &step){
 
-    toolModel newTool = seeds;  //BODY part is done here
+    toolModel newTool = seeds;  //Output toolModel
 
+    //Perturb tvec_cyl/rvec_cyl by random noise
     double dev = randomNumber(step, 0);
-
     newTool.tvec_cyl(0) = seeds.tvec_cyl(0) + dev;
-
     dev = randomNumber(step, 0);
     newTool.tvec_cyl(1) = seeds.tvec_cyl(1) + dev;
-
     dev = randomNumber(step, 0);
     newTool.tvec_cyl(2) = seeds.tvec_cyl(2)+ dev;
-
     dev = randomNumber(step, 0);
     newTool.rvec_cyl(0) = seeds.rvec_cyl(0)+ dev;
-
     dev = randomNumber(step, 0);
     newTool.rvec_cyl(1) = seeds.rvec_cyl(1)+ dev;
-
     dev = randomNumber(step, 0);
     newTool.rvec_cyl(2) = seeds.rvec_cyl(2)+ dev;
 
-    /************** sample the angles of the joints **************/
-    //set positive as clockwise
+    //Perturb joints 5,6,7 by random noise
+    //Positive = CW if angles are pretty goog, then give small noises
     double theta_1 = theta_cylinder + randomNumber(0.0001, 0);   // tool rotation
     double theta_grip_1 = theta_oval + randomNumber(0.0001, 0); // oval rotation
     double theta_grip_2 = theta_open + randomNumber(0.0001, 0);
 
+    //Generate a toolModel representation of joints 1-7
     computeEllipsePose(newTool, theta_1, theta_grip_1, theta_grip_2);
 
     return newTool;
@@ -796,8 +778,7 @@ ToolModel::toolModel ToolModel::gaussianSampling(const toolModel &max_pose, doub
     dev_ori = randomNumber(step, 0);
     gaussianTool.rvec_cyl(2) = max_pose.rvec_cyl(2)+ dev_ori;
 
-    /************** sample the angles of the joints **************/
-    //set positive as clockwise
+    //perturb joint angles by random noise, positive = CW
     double theta_ = randomNumber(0.001, 0);    //-90,90
     double theta_grip_1 = randomNumber(0.001, 0);
     double theta_grip_2 = randomNumber(0.001, 0);
@@ -808,29 +789,32 @@ ToolModel::toolModel ToolModel::gaussianSampling(const toolModel &max_pose, doub
 
 };
 
-/*using ellipse pose to compute cylinder pose, this is for particle filter*/
 void ToolModel::computeRandomPose(const toolModel &seed_pose, toolModel &inputModel, const double &theta_tool, const double &theta_grip_1,
                                   const double &theta_grip_2) {
-
+    //take cylinder part as the origin
     cv::Mat I = cv::Mat::eye(3, 3, CV_64FC1);
-    ///take cylinder part as the origin
-    cv::Mat q_temp(4, 1, CV_64FC1);
 
+    ////////////////////////PART 1: computations for ellipse //////////////////////
+    //Part 1.a: translation component
+    //Compute ellipse origin <x,y,z,1>
+    cv::Mat q_temp(4, 1, CV_64FC1);//values filled in from trial and error in gazebo
     cv::Mat q_ellipse_ = cv::Mat(4, 1, CV_64FC1);
     q_ellipse_.at<double>(0, 0) = 0;
     q_ellipse_.at<double>(1, 0) = 0.015; //notice this mean y is pointing to the gripper tip, should be the same with computeEllipsePose
     q_ellipse_.at<double>(2, 0) = 0;
     q_ellipse_.at<double>(3, 0) = 1;
 
+    //transform the ellipse coord according to cylinder pose
     q_temp = transformPoints(q_ellipse_, cv::Mat(inputModel.rvec_cyl),
                              cv::Mat(inputModel.tvec_cyl)); //transform the ellipse coord according to cylinder pose
 
+    //Update output field tvec_elp
     inputModel.tvec_elp(0) = q_temp.at<double>(0, 0);
     inputModel.tvec_elp(1) = q_temp.at<double>(1, 0);
     inputModel.tvec_elp(2) = q_temp.at<double>(2, 0);
 
     /*********** computations for oval kinematics **********/
-    /********oval part using the best particle pose ********/
+    //Part 1.b: rotation component
     cv::Mat rot_ellipse(3,3,CV_64FC1);
     cv::Rodrigues(seed_pose.rvec_elp, rot_ellipse);
 
@@ -845,7 +829,8 @@ void ToolModel::computeRandomPose(const toolModel &seed_pose, toolModel &inputMo
     cv::Mat temp_vec(3,1,CV_64FC1);
     cv::Rodrigues(rot_new, inputModel.rvec_elp);
 
-    /*********** computations for gripper kinematics **********/
+    /////////////////////////////PART 2: computations for gripper /////////////////////////
+    //Part 2.a: gripper 1
     cv::Mat test_gripper(3, 1, CV_64FC1);
     test_gripper.at<double>(0, 0) = 0;
     test_gripper.at<double>(1, 0) = offset_gripper - offset_ellipse;
@@ -861,11 +846,12 @@ void ToolModel::computeRandomPose(const toolModel &seed_pose, toolModel &inputMo
     inputModel.tvec_grip1(1) = q_rot.at<double>(1, 0) + inputModel.tvec_elp(1);
     inputModel.tvec_grip1(2) = q_rot.at<double>(2, 0) + inputModel.tvec_elp(2);
 
+    //update gripper 2 translation component
     inputModel.tvec_grip2(0) = inputModel.tvec_grip1(0);
     inputModel.tvec_grip2(1) = inputModel.tvec_grip1(1);
     inputModel.tvec_grip2(2) = inputModel.tvec_grip1(2);
 
-    /**** orientation ***/
+    //Update rotation component
     double grip_2_delta = theta_grip_1 - theta_grip_2;
     double grip_1_delta = theta_grip_1 + theta_grip_2;
 
@@ -882,7 +868,8 @@ void ToolModel::computeRandomPose(const toolModel &seed_pose, toolModel &inputMo
 
     cv::Rodrigues(rot_grip_1, inputModel.rvec_grip1 );
 
-    /*gripper 2*/
+    // PART 2.b: gripper 2//
+    //Update rotation component
     cos_theta = cos(grip_2_delta);
     sin_theta = sin(-grip_2_delta);
 
@@ -897,35 +884,38 @@ void ToolModel::computeRandomPose(const toolModel &seed_pose, toolModel &inputMo
     cv::Rodrigues(rot_grip_2, inputModel.rvec_grip2 );
 };
 
-/*using cylinder pose to compute rest pose*/
 void ToolModel::computeEllipsePose(toolModel &inputModel, const double &theta_ellipse, const double &theta_grip_1,
                                    const double &theta_grip_2) {
 
+    //take cylinder as origin
     cv::Mat I = cv::Mat::eye(3, 3, CV_64FC1);
-    /*********** computations for ellipse kinematics **********/
-    ///take cylinder part as the origin
-    cv::Mat q_temp(4, 1, CV_64FC1);
 
+    ////////////////////////PART 1: computations for ellipse //////////////////////
+    //Part 1.a: translation component
+    //Compute ellipse origin <x,y,z,1>
+    cv::Mat q_temp(4, 1, CV_64FC1);//values filled in from trial and error in gazebo
     cv::Mat q_ellipse_(4, 1, CV_64FC1);
     q_ellipse_.at<double>(0, 0) = 0;
     q_ellipse_.at<double>(1, 0) = 0.011;//(offset_ellipse - offset_body);
     q_ellipse_.at<double>(2, 0) = 0;
     q_ellipse_.at<double>(3, 0) = 1;
 
+    //transform the ellipse coord according to cylinder pose
     q_temp = transformPoints(q_ellipse_, cv::Mat(inputModel.rvec_cyl),
                              cv::Mat(inputModel.tvec_cyl)); //transform the ellipse coord according to cylinder pose
 
+    //Update output field tvec_elp
     inputModel.tvec_elp(0) = q_temp.at<double>(0, 0);
     inputModel.tvec_elp(1) = q_temp.at<double>(1, 0);
     inputModel.tvec_elp(2) = q_temp.at<double>(2, 0);
 
+    //Part 1.b: Rotation component
     cv::Mat rot_ellipse(3,3,CV_64FC1);
     cv::Rodrigues(inputModel.rvec_cyl, rot_ellipse);
 
     double cos_theta = cos(theta_ellipse);
     double sin_theta = sin(theta_ellipse);
 
-    /*** this works in simulation ?? ***/
     cv::Mat g_ellipse = (cv::Mat_<double>(3,3) << cos_theta, -sin_theta, 0,
             sin_theta, cos_theta, 0,
             0,0, 1);
@@ -934,7 +924,8 @@ void ToolModel::computeEllipsePose(toolModel &inputModel, const double &theta_el
     cv::Mat temp_vec(3,1,CV_64FC1);
     cv::Rodrigues(rot_new, inputModel.rvec_elp);
 
-    /*********** computations for gripper kinematics **********/
+    /////////////////////////////PART 2: computations for gripper /////////////////////////
+    //Part 2.a: gripper 1
     cv::Mat test_gripper(3, 1, CV_64FC1);
     test_gripper.at<double>(0, 0) = 0;
     test_gripper.at<double>(1, 0) = 0.006;
@@ -950,12 +941,12 @@ void ToolModel::computeEllipsePose(toolModel &inputModel, const double &theta_el
     inputModel.tvec_grip1(1) = q_rot.at<double>(1, 0) + inputModel.tvec_elp(1);
     inputModel.tvec_grip1(2) = q_rot.at<double>(2, 0) + inputModel.tvec_elp(2);
 
+    //Update rotation component
     double theta_orien_grip = -1.0 * theta_grip_1; //maybe the x being flipped
     double theta_grip_open = theta_grip_2;
     if(theta_grip_open < 0.0){
         theta_grip_open = 0.0;
     }
-
     double grip_2_delta = theta_orien_grip - theta_grip_open;
     double grip_1_delta = theta_orien_grip + theta_grip_open;
 
@@ -969,7 +960,8 @@ void ToolModel::computeEllipsePose(toolModel &inputModel, const double &theta_el
     cv::Mat rot_grip_1 = rot_elp * gripper_1_ ;
     cv::Rodrigues(rot_grip_1, inputModel.rvec_grip1);
 
-    /*gripper 2*/
+    // PART 2.b: gripper 2//
+    //Update translation component
     inputModel.tvec_grip2(0) = inputModel.tvec_grip1(0);
     inputModel.tvec_grip2(1) = inputModel.tvec_grip1(1);
     inputModel.tvec_grip2(2) = inputModel.tvec_grip1(2);
@@ -981,6 +973,7 @@ void ToolModel::computeEllipsePose(toolModel &inputModel, const double &theta_el
             0,cos_theta,-sin_theta,
             0, sin_theta, cos_theta);
 
+    //Update rotation component
     cv::Mat rot_grip_2 = rot_elp * gripper_2_;
     cv::Rodrigues(rot_grip_2, inputModel.rvec_grip2);
 };
@@ -1020,11 +1013,8 @@ void ToolModel::computeInvSE(const cv::Mat &inputMat, cv::Mat &outputMat){
 
 }
 
-/****render a rectangle contains the tool model, TODO:*****/
-void
-ToolModel::renderTool(cv::Mat &image, const toolModel &tool, cv::Mat &CamMat, const cv::Mat &P, cv::OutputArray jac) {
+void ToolModel::renderTool(cv::Mat &image, const toolModel &tool, cv::Mat &CamMat, const cv::Mat &P, cv::OutputArray jac) {
 
-    /** approach 1: using Vertices mat and normal mat **/
     Compute_Silhouette(body_faces, body_neighbors, body_Vmat, body_Nmat, CamMat, image, cv::Mat(tool.rvec_cyl),
                        cv::Mat(tool.tvec_cyl), P, jac);
 
@@ -1039,7 +1029,6 @@ ToolModel::renderTool(cv::Mat &image, const toolModel &tool, cv::Mat &CamMat, co
 
 };
 
-/*** difference: give tool_normals ***/
 void ToolModel::renderToolUKF(cv::Mat &image, const toolModel &tool, cv::Mat &CamMat, const cv::Mat &P,
                          cv::Mat &tool_points, cv::Mat &tool_normals, cv::OutputArray jac) {
 
@@ -1233,73 +1222,76 @@ float ToolModel::calculateMatchingScore(cv::Mat &toolImage, const cv::Mat &segme
     return matchingScore;
 }
 
-/*** chamfer matching algorithm, using distance transform, generate measurement model for PF ***/
 float ToolModel::calculateChamferScore(cv::Mat &toolImage, const cv::Mat &segmentedImage) {
 
     float output = 0;
+
+    ///////////////////PART 1: particle rendering processing////////////////////////////////
+    //get toolImage's binary grayscale representation (all 1 pixels represent the particle)
     cv::Mat ROI_toolImage = toolImage.clone(); //CV_8UC3
-    cv::Mat segImgGrey = segmentedImage.clone(); //CV_8UC1
-
-    segImgGrey.convertTo(segImgGrey, CV_8UC1);
-
-    /***tool image process**/
     cv::Mat toolImageGrey(ROI_toolImage.size(), CV_8UC1); //grey scale of toolImage since tool image has 3 channels
-    cv::Mat toolImFloat(ROI_toolImage.size(), CV_32FC1); //Float data type of grey scale tool image
-    cv::cvtColor(ROI_toolImage, toolImageGrey, CV_BGR2GRAY); //convert it to grey scale
+    cv::cvtColor(ROI_toolImage, toolImageGrey, CV_BGR2GRAY); //render bw version of ROI_toolImage on toolImageGrey
 
+    cv::Mat toolImFloat(ROI_toolImage.size(), CV_32FC1); //Float data type of grey scale tool image
     toolImageGrey.convertTo(toolImFloat, CV_32FC1); // get float img
 
-    cv::Mat BinaryImg(toolImFloat.size(), toolImFloat.type());
+    cv::Mat BinaryImg(toolImFloat.size(), toolImFloat.type()); //binary representation of toolImFloat (all 1 pixels represent the particle)
     BinaryImg = toolImFloat * (1.0/255);
 
-    /***segmented image process**/
+    ///////////////////PART 2: segmenting image processing////////////////////////////////
+    //convert segmented image to 8UC1 and invert it.  All 0 values in segImgGrey are parts of the tool
+    cv::Mat segImgGrey = segmentedImage.clone(); //CV_8UC1
+    segImgGrey.convertTo(segImgGrey, CV_8UC1);
     for (int i = 0; i < segImgGrey.rows; i++) {
         for (int j = 0; j < segImgGrey.cols; j++) {
             segImgGrey.at<uchar>(i,j) = 255 - segImgGrey.at<uchar>(i,j);
-
         }
     }
 
-    cv::Mat normDIST;
-    cv::Mat distance_img;
+    //compute normalized closest distance of every pixel to a segmented tool part (represented by 0's in segImgGrey)
+    cv::Mat normDIST; //distance to closest part of tool
+    cv::Mat distance_img; //normalized distance_img
     cv::distanceTransform(segImgGrey, distance_img, CV_DIST_L2, 3);
     cv::normalize(distance_img, normDIST, 0.00, 1.00, cv::NORM_MINMAX);
 
 //    cv::imshow("segImgGrey img", segImgGrey);
 //    cv::imshow("Normalized img", normDIST);
-////    cv::imshow("distance_img", distance_img);
+//    cv::imshow("distance_img", distance_img);
 //    cv::waitKey();
 
-    /***multiplication process**/
-    cv::Mat resultImg; //initialize
+    //////////////////PART 3: Compute Chamfer Distance//////////////////////////
+    //When we multiply BinaryImg by normDist, we get the distance of every pixel representing the particle to the closest pixel representing the segmented image
+    cv::Mat resultImg;
     cv::multiply(normDIST, BinaryImg, resultImg);
 
+    //We now sum all these distances
     for (int k = 0; k < resultImg.rows; ++k) {
         for (int i = 0; i < resultImg.cols; ++i) {
-
             double mul = resultImg.at<float>(k,i);
             if(mul > 0.0)
                 output += mul;
         }
     }
     //ROS_INFO_STREAM("OUTPUT: " << output);
+    //Scale the output
     output = exp(-1 * output/80);
 
     return output;
 
 };
 
-/*********** reproject a single point under the camera onto a image, FOR THE BODY COORD TRANSFORMATION ***************/
 cv::Point2d ToolModel::reproject(const cv::Mat &point, const cv::Mat &P) {
     cv::Mat results(3, 1, CV_64FC1);
     cv::Point2d output;
 
+    //convert point to homogenous matrix representation to allow for multiplication
     cv::Mat ptMat(4, 1, CV_64FC1);
     ptMat.at<double>(0, 0) = point.at<double>(0, 0);
     ptMat.at<double>(1, 0) = point.at<double>(1, 0);
     ptMat.at<double>(2, 0) = point.at<double>(2, 0);
     ptMat.at<double>(3, 0) = 1.0;
 
+    //project point under camera frame using multiplication
     results = P * ptMat;
     output.x = results.at<double>(0, 0) / results.at<double>(2, 0);
     output.y = results.at<double>(1, 0) / results.at<double>(2, 0);

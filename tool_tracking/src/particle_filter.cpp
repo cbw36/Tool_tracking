@@ -36,28 +36,28 @@
  *
  */
 
-#include <tool_tracking/particle_filter.h>  //everything inside here
+#include <tool_tracking/particle_filter.h>
 using namespace std;
 
 ParticleFilter::ParticleFilter(ros::NodeHandle *nodehandle):
         node_handle(*nodehandle), numParticles(120), down_sample_rate(0.0028), error(1)
 {
-    /********** using calibration results: camera-base transformation *******/
+    //Gcb left from calibration results
     Cam_left_arm_1 = (cv::Mat_<double>(4,4) << -0.7882, 0.6067, 0.1025, -0.125049,  //-0.7882, 0.6067, 0.1025, -0.1449,
             0.5854, 0.7909, -0.1784, -0.0500,   //	0.5854, 0.7909, -0.1784, -0.0607,
             -0.1894, -0.0806, -0.9786, 0.0180, //	-0.1894, -0.0806, -0.9786, 0.0200,   0.0157
             0,0, 0, 1.0000);
-
-    cv::Mat rot(3,3,CV_64FC1);
+    cv::Mat rot(3,3,CV_64FC1); //updated rotation from testing
     cv::Mat rot_vec = (cv::Mat_<double>(3,1) << 1.01976677, 2.60519, -0.1857696); //1.019976677, 2.5822519, -0.200696
     cv::Rodrigues(rot_vec, rot);
     rot.copyTo(Cam_left_arm_1.colRange(0,3).rowRange(0,3));
 
+	//Gcb right from calibration results
     Cam_right_arm_1 = (cv::Mat_<double>(4,4) << -0.7893, 0.6067, 0.0949, -0.13599, // -0.7893, 0.6067, 0.0949, -0.1428,
             0.5852, 0.7899, -0.1835, -0.0500,   ///	0.5852, 0.7899, -0.1835, -0.0612,
             -0.1861, -0.0892, -0.9784, 0.0180,     //	-0.1861, -0.0892, -0.9784, 0.0223,
             0,0, 0, 1.0000);
-    rot_vec = (cv::Mat_<double>(3,1) << 1.009996677, 2.5802519, -0.18696);
+    rot_vec = (cv::Mat_<double>(3,1) << 1.009996677, 2.5802519, -0.18696); //updated rotation from testing
     cv::Rodrigues(rot_vec, rot);
     rot.copyTo(Cam_right_arm_1.colRange(0,3).rowRange(0,3));
 
@@ -66,9 +66,11 @@ ParticleFilter::ParticleFilter(ros::NodeHandle *nodehandle):
 
 	initializeParticles();
 
+	//subscribe to camera projection matrices
 	projectionMat_subscriber_r = node_handle.subscribe("/davinci_endo/right/camera_info", 1, &ParticleFilter::projectionRightCB, this);
 	projectionMat_subscriber_l = node_handle.subscribe("/davinci_endo/left/camera_info", 1, &ParticleFilter::projectionLeftCB, this);
 
+	//Initialize remainding fields
 	toolImage_left_arm_1 = cv::Mat::zeros(480, 640, CV_8UC3);
 	toolImage_right_arm_1 = cv::Mat::zeros(480, 640, CV_8UC3);
 
@@ -98,21 +100,19 @@ void ParticleFilter::initializeParticles() {
 
 	particles_arm_1.resize(numParticles); //initialize particle array
 	particleWeights_arm_1.resize(numParticles); //initialize particle weight array
-
 	particles_arm_2.resize(numParticles); //initialize particle array
 	particleWeights_arm_2.resize(numParticles); //initialize particle weight array
 
-    /******Find and convert our various params and inputs******/
-    //Get sensor update
+	//Compute initial guess from FK and generate particles around initial guess
     kinematics = Davinci_fwd_solver();
     getCoarseGuess();
 
 };
 
 void ParticleFilter::getCoarseGuess(){
-    //Pull in our first round of sensor data.
+	//Initialize joint feedback data
     davinci_interface::init_joint_feedback(node_handle);
-
+	//store robot joint angles
     std::vector<std::vector<double> > tmp;
     tmp.resize(2);
     if(davinci_interface::get_fresh_robot_pos(tmp)){
@@ -120,17 +120,18 @@ void ParticleFilter::getCoarseGuess(){
         sensor_2 = tmp[1];
     }
 
-    Eigen::Affine3d a1_pos_1 = kinematics.computeAffineOfDH(DH_a_params[0], DH_d1, DH_alpha_params[0], sensor_1[0] + DH_q_offset0 );
+	/////////////Get toolModel representation of pose from sensor////////////////////////////////
+	//Compute position variable a1_rvec representing joints 1-4 (3x1 cv::mat) using FK and DH parameters
+	Eigen::Affine3d a1_pos_1 = kinematics.computeAffineOfDH(DH_a_params[0], DH_d1, DH_alpha_params[0], sensor_1[0] + DH_q_offset0 );
     Eigen::Affine3d a1_pos_2 = kinematics.computeAffineOfDH(DH_a_params[1], DH_d2, DH_alpha_params[1], sensor_1[1] + DH_q_offset1 );
     Eigen::Affine3d a1_pos_3 = kinematics.computeAffineOfDH(DH_a_params[2], sensor_1[2] + DH_q_offset2, DH_alpha_params[2], 0.0 );
     Eigen::Affine3d a1_pos_4 = kinematics.computeAffineOfDH(DH_a_params[3],  DH_d4, DH_alpha_params[3], sensor_1[3] + DH_q_offset3 );
-
     Eigen::Affine3d a1_pos = kinematics.affine_frame0_wrt_base_ * a1_pos_1 * a1_pos_2 * a1_pos_3* a1_pos_4;// *a1_5 * a1_6 * a1_7 * kinematics.affine_gripper_wrt_frame6_ ;
     Eigen::Vector3d a1_trans = a1_pos.translation();
-
     cv::Mat a1_rvec = cv::Mat::zeros(3,1,CV_64FC1);
     computeRodriguesVec(a1_pos, a1_rvec);
 
+	//toolModel representation of initial guess of configuration of joints 1-4 computed above.  Used for testing purposes
 	predicted_real_pose.tvec_cyl(0) = a1_trans[0];
 	predicted_real_pose.tvec_cyl(1) = a1_trans[1];
 	predicted_real_pose.tvec_cyl(2) = a1_trans[2];
@@ -138,15 +139,20 @@ void ParticleFilter::getCoarseGuess(){
 	predicted_real_pose.rvec_cyl(1) = a1_rvec.at<double>(1,0);
 	predicted_real_pose.rvec_cyl(2) = a1_rvec.at<double>(2,0);
 
+	//Compute the toolModel from tvec_cyl, rvec_cyl, and joints 5,6,7
 	newToolModel.computeEllipsePose(predicted_real_pose, sensor_1[4], sensor_1[5], sensor_1[6]);
     ROS_WARN_STREAM("sensor_1[6] " << sensor_1[6]);
-    /*** first arm particles initialization ***/
+
+	////////////////Convert from toolModel to 19x1 mat///////////////////
 	std::vector<double>  initialParticle;
 	initialParticle.resize(19);
+
+	//first 7 fields are the 7 joint angles from sensor
 	for (int i = 0; i < 7; ++i) {
 		initialParticle[i] = sensor_1[i];
 	}
 
+	//Next 6 fields are Gcb left
 	cv::Mat rotationmatrix(3,3,CV_64FC1);
 	cv::Mat p(3,1,CV_64FC1);
 	rotationmatrix = Cam_left_arm_1.colRange(0,3).rowRange(0,3);
@@ -157,11 +163,11 @@ void ParticleFilter::getCoarseGuess(){
 	initialParticle[7] = p.at<double>(0,0);
 	initialParticle[8]= p.at<double>(1,0);
 	initialParticle[9] = p.at<double>(2,0);
-
 	initialParticle[10] = cat_vec.at<double>(0,0);
 	initialParticle[11] = cat_vec.at<double>(1,0);
 	initialParticle[12] = cat_vec.at<double>(2,0);
 
+	//Last 6 fields are Gcb right
 	rotationmatrix = Cam_right_arm_1.colRange(0,3).rowRange(0,3);
 	p = Cam_right_arm_1.colRange(3,4).rowRange(0,3);
 	cv::Rodrigues(rotationmatrix, cat_vec);
@@ -169,32 +175,32 @@ void ParticleFilter::getCoarseGuess(){
 	initialParticle[13] = p.at<double>(0,0);
 	initialParticle[14] = p.at<double>(1,0);
 	initialParticle[15] = p.at<double>(2,0);
-
 	initialParticle[16] = cat_vec.at<double>(0,0);
 	initialParticle[17] = cat_vec.at<double>(1,0);
 	initialParticle[18] = cat_vec.at<double>(2,0);
 
+	//Initialize particles by generating random particles around initial particle guess
 	computeNoisedParticles(initialParticle, particles_arm_1);
 };
 
 void ParticleFilter::computeNoisedParticles(std::vector <double> & inputParticle, std::vector< std::vector <double> > & noisedParticles){
 
 	for (int i = 0; i < noisedParticles.size(); ++i) {
-		noisedParticles[i].resize(19);
+		noisedParticles[i].resize(19);	//Resize all particles to 19x1
 
-		for (int j = 0; j < 7; ++j) {
-            double dev_sensor = newToolModel.randomNumber(down_sample_rate, 0);
+		for (int j = 0; j < 7; ++j) { //Fill in first 7 fields with annealed noised joint angles
+            double dev_sensor = newToolModel.randomNumber(down_sample_rate, 0); //draw an annealed random number (higher early in algo for more perturbation)
 			inputParticle[j] = inputParticle[j] + dev_sensor;
 		}
-        /**** make noise for and right camera the same ****/
-        std::vector<double> dev_cam;
+
+        std::vector<double> dev_cam; //same noise for left and right cam
         dev_cam.resize(6);
 
+		//fill in remaining 12 with noised camera transforms
         for (int j = 7; j < 13; ++j) {
             dev_cam[j-7] = newToolModel.randomNumber(0.0002, 0);
 			inputParticle[j] = inputParticle[j] + dev_cam[j-7];
 		}
-
         for (int j = 13; j < 19; ++j) {
             inputParticle[j] = inputParticle[j] + dev_cam[j-13];
         }
@@ -253,7 +259,7 @@ void ParticleFilter::trackingTool(const cv::Mat &segmented_left, const cv::Mat &
 //	std::vector<cv::Mat> trackingImages;
 //	trackingImages.resize(2);
 
-	/***Update according to the max score***/
+	//Update according to the max score
 	double maxScore_1 = 0.0;
 	int maxScoreIdx_1 = -1; //maximum scored particle index
 	double totalScore_1 = 0.0; //total score
@@ -261,47 +267,48 @@ void ParticleFilter::trackingTool(const cv::Mat &segmented_left, const cv::Mat &
 	toolImage_left_temp.setTo(0);
 	toolImage_right_temp.setTo(0);
 
-	std::vector<ToolModel::toolModel> particle_models;
+	////////////////////PART 1: Store particles as both toolModels and matrices/////////////////////
+	std::vector<ToolModel::toolModel> particle_models; //vector of toolModel representation of all particles (previously 19x1)
 	particle_models.resize(numParticles);
 
+	//Initialize vector to store Gcb mats for each particle.  Needed for rendering
 	std::vector<cv::Mat> cam_matrices_left_arm_1;
 	std::vector<cv::Mat> cam_matrices_right_arm_1;
 	cam_matrices_left_arm_1.resize(numParticles);
 	cam_matrices_right_arm_1.resize(numParticles);
 	ToolModel::toolModel temp_model;
 
+	//Convert each particle from 19x1 to toolModel
 	for (int k = 0; k < numParticles; ++k) {
-
+		//use FK for joints 1-4
 		Eigen::Affine3d a1_pos_1 = kinematics.computeAffineOfDH(DH_a_params[0], DH_d1, DH_alpha_params[0], particles_arm_1[k][0] + DH_q_offset0 );
 		Eigen::Affine3d a1_pos_2 = kinematics.computeAffineOfDH(DH_a_params[1], DH_d2, DH_alpha_params[1], particles_arm_1[k][1] + DH_q_offset1 );
 		Eigen::Affine3d a1_pos_3 = kinematics.computeAffineOfDH(DH_a_params[2], particles_arm_1[k][2] + DH_q_offset2, DH_alpha_params[2], 0.0 );
 		Eigen::Affine3d a1_pos_4 = kinematics.computeAffineOfDH(DH_a_params[3],  DH_d4, DH_alpha_params[3], particles_arm_1[k][3] + DH_q_offset3 );
-
 		Eigen::Affine3d a1_pos = kinematics.affine_frame0_wrt_base_ * a1_pos_1 * a1_pos_2 * a1_pos_3* a1_pos_4;// *a1_5 * a1_6 * a1_7 * kinematics.affine_gripper_wrt_frame6_ ;
 		Eigen::Vector3d a1_trans = a1_pos.translation();
-
 		cv::Mat a1_rvec = cv::Mat::zeros(3,1,CV_64FC1);
 		computeRodriguesVec(a1_pos, a1_rvec);
 
-		temp_model.tvec_cyl(0) = a1_trans[0];  //left and right (image frame)
-		temp_model.tvec_cyl(1) = a1_trans[1];  //up and down
+		//get toolModel representation of joints 1-4
+		temp_model.tvec_cyl(0) = a1_trans[0];
+		temp_model.tvec_cyl(1) = a1_trans[1];
 		temp_model.tvec_cyl(2) = a1_trans[2];
 		temp_model.rvec_cyl(0) = a1_rvec.at<double>(0,0);
 		temp_model.rvec_cyl(1) = a1_rvec.at<double>(1,0);
 		temp_model.rvec_cyl(2) = a1_rvec.at<double>(2,0);
 
+		//Compute toolModel pose based on toolModel joints 1-4 and joint angles 5,6,7
 		newToolModel.computeEllipsePose(temp_model, particles_arm_1[k][4], particles_arm_1[k][5], particles_arm_1[k][6]);
-
 		particle_models[k] = temp_model;
 
-		/**** left camera ***/
+		//Store Get Gcb left and right for current particle in cam_matrices
 		cv::Mat rotationmatrix(3,3,CV_64FC1);
 		cv::Mat p(3,1,CV_64FC1);
 		cv::Mat cat_vec(3,1, CV_64FC1);
 		p.at<double>(0,0) = particles_arm_1[k][7];
 		p.at<double>(1,0) = particles_arm_1[k][8];
 		p.at<double>(2,0) = particles_arm_1[k][9];
-
 		cat_vec.at<double>(0,0) = particles_arm_1[k][10];
 		cat_vec.at<double>(1,0) = particles_arm_1[k][11];
 		cat_vec.at<double>(2,0) = particles_arm_1[k][12];
@@ -311,7 +318,6 @@ void ParticleFilter::trackingTool(const cv::Mat &segmented_left, const cv::Mat &
 		rotationmatrix.copyTo(cam_matrices_left_arm_1[k].colRange(0,3).rowRange(0,3));
 		p.copyTo(cam_matrices_left_arm_1[k].colRange(3,4).rowRange(0,3));
 
-        /****right camera*/
 		p.at<double>(0,0) = particles_arm_1[k][13];
 		p.at<double>(1,0) = particles_arm_1[k][14];
 		p.at<double>(2,0) = particles_arm_1[k][15];
@@ -324,16 +330,18 @@ void ParticleFilter::trackingTool(const cv::Mat &segmented_left, const cv::Mat &
 		cam_matrices_right_arm_1[k] = cv::Mat::eye(4,4,CV_64FC1);
 		rotationmatrix.copyTo(cam_matrices_right_arm_1[k].colRange(0,3).rowRange(0,3));
 		p.copyTo(cam_matrices_right_arm_1[k].colRange(3,4).rowRange(0,3));
-
 	}
 
-	/*** do the sampling and get the matching score ***/
+	//////////////////////////Part 2: Measurement Model///////////////////////////////
 	for (int i = 0; i < numParticles; ++i) {
+		//get matching score of particle i
 		matchingScores_arm_1[i] = measureFuncSameCam(toolImage_left_arm_1,toolImage_right_arm_1, particle_models[i], segmented_left, segmented_right,cam_matrices_left_arm_1[i],cam_matrices_right_arm_1[i]);
 
+		//render tool in left and right camera frame on temp image
 		newToolModel.renderTool(toolImage_left_temp, particle_models[i], cam_matrices_left_arm_1[i], P_left);
 		newToolModel.renderTool(toolImage_right_temp, particle_models[i], cam_matrices_right_arm_1[i], P_right);
 
+		//store total match score for normalization and largest discovered match score/index to render best particle in visualization
 		if (matchingScores_arm_1[i] >= maxScore_1) {
 			maxScore_1 = matchingScores_arm_1[i];
 			maxScoreIdx_1 = i;
@@ -341,48 +349,48 @@ void ParticleFilter::trackingTool(const cv::Mat &segmented_left, const cv::Mat &
 		totalScore_1 += matchingScores_arm_1[i];
 	}
 
+	//show composite of all particles in left/right camera on temp images (just for visualization)
 	cv::imshow("temp image arm_1 left: " , toolImage_left_temp);
 	cv::imshow("temp image arm_1 right:  " , toolImage_right_temp);
 	ROS_INFO_STREAM("Maxscore arm 1: " << maxScore_1);  //debug
 
-	/*** calculate weights using matching score and do the resampling ***/
+	//compute weights as normalized matching scores
 	for (int j = 0; j < numParticles; ++j) { // normalize the weights
 		particleWeights_arm_1[j] = (matchingScores_arm_1[j] / totalScore_1);
 	}
 
+	//store the best particle and its pose(that with highest weight)
 	ToolModel::toolModel best_tool_pose = particle_models[maxScoreIdx_1];
 //	ROS_INFO("Real tool at (%f %f %f): %f %f %f, ", predicted_real_pose.tvec_cyl(0), predicted_real_pose.tvec_cyl(1),predicted_real_pose.tvec_cyl(2),predicted_real_pose.rvec_cyl(0),predicted_real_pose.rvec_cyl(1), predicted_real_pose.rvec_cyl(2));
 //	ROS_WARN("Particle ARM AT (%f %f %f): %f %f %f, ",best_tool_pose.tvec_cyl(0), best_tool_pose.tvec_cyl(1),best_tool_pose.tvec_cyl(2),best_tool_pose.rvec_cyl(0),best_tool_pose.rvec_cyl(1), best_tool_pose.rvec_cyl(2));
 //	////compute RMS errors before update
 //	showGazeboToolError(predicted_real_pose, best_tool_pose);
-
 	std::vector<double> best_particle = particles_arm_1[maxScoreIdx_1];
 
-	///showing results for each iteration here
+	//render the best particle on real images and show
 	newToolModel.renderTool(raw_image_left, particle_models[maxScoreIdx_1], cam_matrices_left_arm_1[maxScoreIdx_1], P_left);
 	newToolModel.renderTool(raw_image_right, particle_models[maxScoreIdx_1], cam_matrices_right_arm_1[maxScoreIdx_1], P_right);
-
-    // showing the best particle on left and right image
 	cv::imshow("trackingImages left", raw_image_left);
 	cv::imshow("trackingImages right", raw_image_right);
 
-	//each time will clear the particles and resample them, resample using low variance resampling method
+	//////////////////////PART 3: Resampling/////////////////////////////////////
 	std::vector<std::vector<double> > oldParticles = particles_arm_1;
 	resamplingParticles(oldParticles, particleWeights_arm_1, particles_arm_1);
     cv::waitKey(20);
 
+	/////////////////////////PART 4: Motion model////////////////////////////////
 	updateParticles(best_particle, maxScore_1, particles_arm_1, predicted_real_pose);
 };
 
 void ParticleFilter::showGazeboToolError(ToolModel::toolModel &real_pose, ToolModel::toolModel &bestParticle){
-
+	//Get matrix representations of the toolModels
 	double dim = 24;
 	cv::Mat renderedMat = cv::Mat::zeros(dim,1,CV_64FC1);
 	cv::Mat real_tool_vector = cv::Mat::zeros(dim,1,CV_64FC1);
-
 	convertToolModeltoMatrix(bestParticle, renderedMat);
 	convertToolModeltoMatrix(real_pose, real_tool_vector);
 
+	//Find difference between real_pose and bestParticle
 	cv::Mat diff = real_tool_vector - renderedMat;
 	double error = diff.dot(diff);
 	error = sqrt(error);
@@ -390,26 +398,27 @@ void ParticleFilter::showGazeboToolError(ToolModel::toolModel &real_pose, ToolMo
 	ROS_WARN_STREAM("Position and orientation  error: " << error);
 };
 
-/***** update particles to find and reach to the best pose ***/
 void ParticleFilter::updateParticles(std::vector <double> &best_particle_last, double &maxScore, std::vector<std::vector <double> > &updatedParticles, ToolModel::toolModel & predicted_real_pose) {
+	/////////PART 1:  Update the FK guess of state predicted_real_pose from sensor data////////////////////////////////
+	//Initialize joint feedback data
 	std::vector<std::vector<double> > tmp;
+	//store robot joint angles
 	tmp.resize(2);
 	if(davinci_interface::get_fresh_robot_pos(tmp)){
 		sensor_1 = tmp[0];
 		sensor_2 = tmp[1];
 	}
-
+	//Compute position variable a1_rvec representing joints 1-4 (3x1 cv::mat) using FK and DH parameters
 	Eigen::Affine3d a1_pos_1 = kinematics.computeAffineOfDH(DH_a_params[0], DH_d1, DH_alpha_params[0], sensor_1[0] + DH_q_offset0 );
 	Eigen::Affine3d a1_pos_2 = kinematics.computeAffineOfDH(DH_a_params[1], DH_d2, DH_alpha_params[1], sensor_1[1] + DH_q_offset1 );
 	Eigen::Affine3d a1_pos_3 = kinematics.computeAffineOfDH(DH_a_params[2], sensor_1[2] + DH_q_offset2, DH_alpha_params[2], 0.0 );
 	Eigen::Affine3d a1_pos_4 = kinematics.computeAffineOfDH(DH_a_params[3],  DH_d4, DH_alpha_params[3], sensor_1[3] + DH_q_offset3 );
-
 	Eigen::Affine3d a1_pos = kinematics.affine_frame0_wrt_base_ * a1_pos_1 * a1_pos_2 * a1_pos_3* a1_pos_4;// *a1_5 * a1_6 * a1_7 * kinematics.affine_gripper_wrt_frame6_ ;
 	Eigen::Vector3d a1_trans = a1_pos.translation();
-
 	cv::Mat a1_rvec = cv::Mat::zeros(3,1,CV_64FC1);
 	computeRodriguesVec(a1_pos, a1_rvec);
 
+	//update cylinder info joints 1-4
 	predicted_real_pose.tvec_cyl(0) = a1_trans[0];
 	predicted_real_pose.tvec_cyl(1) = a1_trans[1];
 	predicted_real_pose.tvec_cyl(2) = a1_trans[2];
@@ -417,45 +426,57 @@ void ParticleFilter::updateParticles(std::vector <double> &best_particle_last, d
 	predicted_real_pose.rvec_cyl(1) = a1_rvec.at<double>(1,0);
 	predicted_real_pose.rvec_cyl(2) = a1_rvec.at<double>(2,0);
 
+	//store joints 5,6,7
 	double theta_oval = sensor_1[4];
 	double theta_grip = sensor_1[5];
 	double theta_open = sensor_1[6];
 
+	//compute toolModel representation of sensor guess of state
 	newToolModel.computeEllipsePose(predicted_real_pose, theta_oval, theta_grip, theta_open);
 
+
+	///////////////////////PART 2: Predict Velocity/////////////////////////////
+	// Get next state from the joints
 	cv::Mat next_joint_estimate = cv::Mat::zeros(7,1,CV_64FC1);
 	for (int i = 0; i < 7; ++i) {
 		next_joint_estimate.at<double>(i,0) = sensor_1[i];
 	}
 	t_1_step = ros::Time::now().toSec();
 
+	//Get prior state from particle
 	cv::Mat current_joint = cv::Mat::zeros(7,1,CV_64FC1);
 	for (int i = 0; i < 7; ++i) {
 		current_joint.at<double>(i,0) = best_particle_last[i];
 	}
 
+	//Compute velocity from these two states
 	cv::Mat delta_thetas = next_joint_estimate - current_joint;
 	double delta_t = t_1_step - t_step;
-	cv::Mat nom_vel = delta_thetas *  (1 / delta_t);
+	cv::Mat nom_vel = delta_thetas *  (1 / delta_t); //vel= change in position / change in time
     double velocity_bar = cv::sum( nom_vel )[0];
     ROS_INFO_STREAM("velocity_bar " << velocity_bar);
+
+	///////////////////////////PART 3: Propagate Particles via velocity//////////////////////
     if(fabs(velocity_bar) > 0.012){
         ROS_WARN(" Refresh state! ");
-        /******** using the obtained velocity to propagate the particles ********/
+
         for (int j = 0; j < updatedParticles.size(); ++j) {
-            for (int i = 0; i < 7; ++i) {
+        	//Update first 7 state fields (joint angles)
+            for (int i = 0; i < 7; ++i) { //store current positions to propagate
                 current_joint.at<double>(i,0) = updatedParticles[j][i];
             }
-            cv::Mat new_joint_state = current_joint + nom_vel * delta_t;
-            for (int k = 0; k < 7; ++k) {
+
+            cv::Mat new_joint_state = current_joint + nom_vel * delta_t; //new state = old state + vel*dt
+            for (int k = 0; k < 7; ++k) {//update particles after propagation
                 updatedParticles[j][k] = new_joint_state.at<double>(k,0);
             }
 
+			//Update final 12 state fields (Gcb left/right) as done before
             cv::Mat rotationmatrix(3,3,CV_64FC1);
             cv::Mat p(3,1,CV_64FC1);
             rotationmatrix = Cam_left_arm_1.colRange(0,3).rowRange(0,3);
-            p = Cam_left_arm_1.colRange(3,4).rowRange(0,3);
-            cv::Mat cat_vec(3,1, CV_64FC1);
+            p = Cam_left_arm_1.colRange(3,4).rowRange(0,3); //camera translation
+            cv::Mat cat_vec(3,1, CV_64FC1); //camera rotation
             cv::Rodrigues(rotationmatrix, cat_vec);
 
             updatedParticles[j][7] = p.at<double>(0,0);
@@ -479,14 +500,14 @@ void ParticleFilter::updateParticles(std::vector <double> &best_particle_last, d
             updatedParticles[j][18] = cat_vec.at<double>(2,0);
         }
         down_sample_rate = 0.002;
-
     }
 
     ROS_INFO_STREAM("down_sample_rate " << down_sample_rate);
-    if(maxScore > 1.20){
+    if(maxScore > 1.20){ //Use a small annealing coefficient if we have good particles
         down_sample_rate = 0.0002;
     }
-    /**** add noise for propagated particles ****/
+
+	//////////////////////////////Part 4: Add random noise///////////////////////////
     for (int m = 1; m < updatedParticles.size(); ++m) {
         for (int l = 0; l < 7; ++l) {
             double dev_sensor = newToolModel.randomNumber(down_sample_rate, 0);
@@ -507,42 +528,37 @@ void ParticleFilter::updateParticles(std::vector <double> &best_particle_last, d
     if(down_sample_rate < 0.0002){
         down_sample_rate = 0.0002;
     };
-
-
 };
 
 double ParticleFilter::measureFuncSameCam(cv::Mat & toolImage_left, cv::Mat & toolImage_right, ToolModel::toolModel &toolPose,
 		const cv::Mat &segmented_left, const cv::Mat &segmented_right, cv::Mat &Cam_left, cv::Mat &Cam_right) {
 
-	toolImage_left.setTo(0);
+	toolImage_left.setTo(0); //clear left and right images
 	toolImage_right.setTo(0);
 
-	/***do the sampling and get the matching score***/
-	//first get the rendered image using 3d model of the tool
-	newToolModel.renderTool(toolImage_left, toolPose, Cam_left, P_left);
-	double left = newToolModel.calculateChamferScore(toolImage_left, segmented_left);  //get the matching score
+	newToolModel.renderTool(toolImage_left, toolPose, Cam_left, P_left); //render particle's pose of tool on left image in left camera's frame
+	double left = newToolModel.calculateChamferScore(toolImage_left, segmented_left);   //get the matching score between particle pose and segmented pose
 
-	newToolModel.renderTool(toolImage_right, toolPose, Cam_right, P_right);
-	double right = newToolModel.calculateChamferScore(toolImage_right, segmented_right);
+	newToolModel.renderTool(toolImage_right, toolPose, Cam_right, P_right);//render particle's pose of tool on right image in right camera's frame
+	double right = newToolModel.calculateChamferScore(toolImage_right, segmented_right); //get the matching score between particle pose and segmented pose
 
 	double matchingScore = sqrt(pow(left, 2) + pow(right, 2));
 
 	return matchingScore;
 };
 
-/**** resampling method ****/
 void ParticleFilter::resamplingParticles(const std::vector< std::vector<double> > &sampleModel,
 										 const std::vector<double> &particleWeight,
 										 std::vector<std::vector<double> > &update_particles) {
 
 	int M = sampleModel.size(); //total number of particles
-	double max = 1.0 / M;
+	double max = 1.0 / M; //uniform probability of drawing a particle
 
-	double r = newToolModel.randomNum(0.0, max);
+	double r = newToolModel.randomNum(0.0, max); //random double between 0 and max
 	double w = particleWeight[0]; //first particle weight
 	int idx = 0;
 
-	update_particles.clear(); ///start fresh
+	update_particles.clear();  //clear new particles
 
 	for (int i = 0; i < M; ++i) {
 
@@ -552,10 +568,8 @@ void ParticleFilter::resamplingParticles(const std::vector< std::vector<double> 
 			idx += 1;
 			w = w + particleWeight[idx];
 		}
-
 		update_particles.push_back(sampleModel[idx]);
 	}
-
 };
 
 void ParticleFilter::computeRodriguesVec(const Eigen::Affine3d & trans, cv::Mat rot_vec){
@@ -577,7 +591,6 @@ void ParticleFilter::computeRodriguesVec(const Eigen::Affine3d & trans, cv::Mat 
     //ROS_INFO_STREAM("rot_vec " << rot_vec);
 };
 
-/******from eigen to opencv matrix****/
 void ParticleFilter::convertEigenToMat(const Eigen::Affine3d & trans, cv::Mat & outputMatrix){
 
     outputMatrix = cv::Mat::eye(4,4,CV_64FC1);

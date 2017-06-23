@@ -69,15 +69,10 @@
 #include <sensor_msgs/image_encodings.h>
 #include <cwru_opencv_common/projective_geometry.h>
 
-/**
- * @brief cwru_xform_utils is for running in the Jade version
- */
-#include <cwru_xform_utils/xform_utils.h>
 
-/**
- * @brief xform_utils is for running in the Indigo version
- */
-//#include <xform_utils/xform_utils.h>
+//#include <cwru_xform_utils/xform_utils.h> //for jade (surgical31)
+
+#include <xform_utils/xform_utils.h> //for indigo
 
 class KalmanFilter {
 

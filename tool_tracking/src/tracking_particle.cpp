@@ -56,7 +56,8 @@ int main(int argc, char **argv) {
 	ros::init(argc, argv, "tracking_node");
 
 	ros::NodeHandle nh;
-	/******  initialization  ******/
+
+	//Initialize particles
 	ParticleFilter Particles(&nh);
 
     freshImage = false;
@@ -66,8 +67,6 @@ int main(int argc, char **argv) {
     cv::Mat seg_right  = cv::Mat::zeros(480, 640, CV_8UC1);
 
     trackingImgs.resize(2);
-
-    //TODO: get image size from camera model, or initialize segmented images,
 
     cv::Mat rawImage_left = cv::Mat::zeros(480, 640, CV_8UC3);//CV_32FC1
     cv::Mat rawImage_right = cv::Mat::zeros(480, 640, CV_8UC3);
@@ -100,7 +99,7 @@ int main(int argc, char **argv) {
             cv::imshow("seg left: ",seg_left );
             cv::imshow("seg right: ",seg_right );  
 
-            Particles.trackingTool(seg_left, seg_right); //with rendered tool and segmented img
+            Particles.trackingTool(seg_left, seg_right);
 
 			freshImage = false;
 
